@@ -1,8 +1,8 @@
 ---
 title: "test-article"
 published: 2026-07-11
-updated: 2026-07-11
-draft: true
+updated: "2026-07-14T07:21:00+08:00"
+draft: false
 category: "日常"
 tags: []
 description: ""
