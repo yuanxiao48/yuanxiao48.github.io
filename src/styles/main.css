@@ -7,6 +7,7 @@
 @import './custom-scrollbar.css';
 @import './tags.css';
 @import './gallery.css';
+@import './glass-theme.css';
 
 @plugin '@tailwindcss/typography';
 
@@ -256,12 +257,12 @@ html {
 
     /* Overlay 模式下，滚动后提高导航栏背景模糊度，增强与正文区分 */
     .wallpaper-transparent #navbar.navbar-sticky-shadow > div {
-        backdrop-filter: blur(20px) !important;
+        backdrop-filter: blur(8px) !important;
      
     }
 
     :root.dark .wallpaper-transparent #navbar.navbar-sticky-shadow > div {
-        backdrop-filter: blur(20px) !important;
+        backdrop-filter: blur(8px) !important;
     }
     
     .wallpaper-transparent .btn-card {
@@ -577,4 +578,3 @@ html {
 .pagination-info {
   @apply text-sm text-(--text-secondary) text-center mb-2;
 }
-

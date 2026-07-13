@@ -10,6 +10,7 @@ import {
 	getSortedPosts,
 	getTagList,
 } from "@/utils/content-utils";
+import { articleComparableTime, toArticleDate } from "@/utils/date-utils";
 
 interface Props {
 	class?: string;
@@ -56,8 +57,10 @@ function formatNumber(num: number): string {
 // 获取「最后活动」时间：取每篇文章 published 与 updated 中较新的那个，再从全站所有文章里取最大值。这样新发文章和修改老文章都会刷新该字段。
 const getActivityDate = (post: (typeof posts)[number]): Date => {
 	const { published, updated } = post.data;
-	if (updated && updated > published) return updated;
-	return published;
+	if (updated && articleComparableTime(updated) > articleComparableTime(published)) {
+		return toArticleDate(updated);
+	}
+	return toArticleDate(published);
 };
 
 const lastActivityDate = posts.reduce<Date | null>((latest, post) => {

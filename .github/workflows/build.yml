@@ -2,9 +2,9 @@ name: Build and Check
 
 on:
   push:
-    branches: [ master ] # Adjust branches as needed
+    branches: [ main, master ]
   pull_request:
-    branches: [ master ] # Adjust branches as needed
+    branches: [ main, master ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -29,16 +29,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
-        with:
-          run_install: false # Disable auto-install
-
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: npm ci --legacy-peer-deps
 
       - name: Run Astro Check
-        run: pnpm astro check
+        run: npm run astro -- check
 
   build:
     strategy:
@@ -55,13 +50,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
-        with:
-          run_install: false # Disable auto-install
-
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: npm ci --legacy-peer-deps
 
       - name: Run Astro Build
-        run: pnpm astro build
+        run: npm run build

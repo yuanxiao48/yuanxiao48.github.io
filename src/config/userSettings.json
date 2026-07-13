@@ -1,0 +1,162 @@
+{
+  "site": {
+    "title": "魔女修行日记",
+    "subtitle": "生草小镇",
+    "url": "https://yuanxiao48.github.io",
+    "description": "魔女修行日记宇宙世界观设定集/生草小镇项目设定集/元枭奇思妙想收藏集"
+  },
+  "theme": {
+    "hue": 237,
+    "defaultMode": "system"
+  },
+  "profile": {
+    "name": "元枭测你码",
+    "bio": "Down at the edge, close by a river",
+    "avatar": "assets/images/my-haed-1782131930885.jpg",
+    "github": "https://github.com/yuanxiao48",
+    "email": "yuanxiao114514@gmail.com"
+  },
+  "home": {
+    "title": "魔女修行日记/元枭之家",
+    "subtitles": [
+      "宜家鲨鱼拥有者",
+      "康神开播了？真的假的？",
+      "唉！弄一碗面给你",
+      "孩子们 我其实就没死",
+      "我操 jam buddy太好用了你知道吗",
+      "为什么推特上不去啊我操",
+      "我可以把腰子给你 你给我买个iphone",
+      "锡纸 锡纸！ 雷森吐米！！！"
+    ]
+  },
+  "images": {
+    "wallpaperDesktop": [
+      "assets/images/StudioWallpaper/desktop/my-haed-1782131759936.jpg",
+      "assets/images/StudioWallpaper/desktop/my-haed-1782131786298.jpg",
+      "assets/images/StudioWallpaper/desktop/my-haed-1782131793356.jpg",
+      "assets/images/StudioWallpaper/desktop/my-haed-1782131797952.jpg",
+      "assets/images/StudioWallpaper/desktop/my-haed-1782131801518.jpg",
+      "assets/images/StudioWallpaper/desktop/my-haed-1782131805717.jpg",
+      "assets/images/StudioWallpaper/desktop/my-haed-1782131809555.jpg"
+    ],
+    "wallpaperMobile": [
+      "assets/images/MobileWallpaper/m1.avif",
+      "assets/images/MobileWallpaper/m2.avif",
+      "assets/images/MobileWallpaper/m3.avif",
+      "assets/images/MobileWallpaper/m4.avif",
+      "assets/images/MobileWallpaper/m5.avif",
+      "assets/images/MobileWallpaper/m6.avif"
+    ],
+    "bannerPosition": "0% 20%",
+    "fullscreenPosition": "center",
+    "articleCover": ""
+  },
+  "pages": {
+    "friends": false,
+    "sponsor": false,
+    "guestbook": true,
+    "bangumi": false,
+    "gallery": true
+  },
+  "music": {
+    "showInNavbar": true,
+    "showInSidebar": true,
+    "mode": "meting",
+    "server": "netease",
+    "type": "playlist",
+    "id": "2698274139",
+    "api": "https://api.i-meto.com/meting/api?server=:server&type=:type&id=:id&r=:r",
+    "volume": 0.7,
+    "playMode": "list",
+    "showLyrics": true
+  },
+  "comments": {
+    "enabled": true,
+    "type": "none",
+    "twikooEnvId": "",
+    "walineServerURL": "",
+    "giscusRepo": "yuanxiao48/metawiki",
+    "giscusRepoId": "",
+    "giscusCategory": "General",
+    "giscusCategoryId": "",
+    "disqusShortname": "",
+    "artalkServer": ""
+  },
+  "layout": {
+    "left": [
+      {
+        "type": "profile",
+        "enable": true,
+        "position": "top"
+      },
+      {
+        "type": "announcement",
+        "enable": true,
+        "position": "top"
+      },
+      {
+        "type": "categories",
+        "enable": true,
+        "position": "sticky"
+      },
+      {
+        "type": "tags",
+        "enable": true,
+        "position": "sticky"
+      }
+    ],
+    "right": [
+      {
+        "type": "music",
+        "enable": true,
+        "position": "sticky"
+      },
+      {
+        "type": "stats",
+        "enable": true,
+        "position": "top"
+      },
+      {
+        "type": "sidebarToc",
+        "enable": true,
+        "position": "sticky"
+      },
+      {
+        "type": "calendar",
+        "enable": true,
+        "position": "sticky"
+      },
+      {
+        "type": "siteInfo",
+        "enable": false,
+        "position": "sticky"
+      }
+    ],
+    "mobile": [
+      {
+        "type": "profile",
+        "enable": true
+      },
+      {
+        "type": "music",
+        "enable": true
+      },
+      {
+        "type": "stats",
+        "enable": true
+      },
+      {
+        "type": "announcement",
+        "enable": true
+      },
+      {
+        "type": "categories",
+        "enable": true
+      },
+      {
+        "type": "tags",
+        "enable": true
+      }
+    ]
+  }
+}

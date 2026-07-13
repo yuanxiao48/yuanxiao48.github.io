@@ -2,7 +2,7 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [ master ]
+    branches: [ main ]
   workflow_dispatch:
 
 # Pages 部署需要的权限
@@ -28,17 +28,11 @@ jobs:
         with:
           node-version: '22'
           
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9.14.4
-          run_install: false
-          
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: npm ci --legacy-peer-deps
       
       - name: Build site
-        run: pnpm run build
+        run: npm run build
 
       - name: Create .nojekyll file
         run: touch dist/.nojekyll

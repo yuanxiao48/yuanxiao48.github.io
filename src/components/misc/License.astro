@@ -4,12 +4,12 @@ import { licenseConfig } from "@/config/licenseConfig";
 import { profileConfig } from "@/config/profileConfig";
 import I18nKey from "@/i18n/i18nKey";
 import { i18n } from "@/i18n/translation";
-import { formatDateToYYYYMMDD } from "@/utils/date-utils";
+import { formatArticleDate, type ArticleDateValue } from "@/utils/date-utils";
 
 interface Props {
 	title: string;
 	id: string;
-	pubDate: Date;
+	pubDate: ArticleDateValue;
 	class: string;
 	author: string;
 	sourceLink: string;
@@ -48,7 +48,7 @@ const postUrl = sourceLink || decodeURIComponent(Astro.url.toString());
         {i18n(I18nKey.publishedAt)}
       </div>
       <div class="transition text-black/75 dark:text-white/75 line-clamp-2">
-        {formatDateToYYYYMMDD(pubDate)}
+		{formatArticleDate(pubDate)}
       </div>
     </div>
     <div>

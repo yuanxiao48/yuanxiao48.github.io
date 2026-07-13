@@ -1,0 +1,1940 @@
+<!doctype html>
+<html lang="zh-CN">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>博客操作台</title>
+		<link rel="stylesheet" href="./studio-editor.css" />
+		<style>
+			:root {
+				color-scheme: dark;
+				--bg: #08111d;
+				--panel: #0f1c2b;
+				--panel-2: #132437;
+				--panel-3: #091626;
+				--line: #26384b;
+				--text: #eef5f7;
+				--muted: #91a3b6;
+				--accent: #8fd6cb;
+				--accent-2: #f0bd6a;
+				--danger: #ef7f7f;
+				--shadow: 0 24px 70px rgba(0, 0, 0, 0.3);
+				font-family:
+					Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+					"Segoe UI", sans-serif;
+			}
+			* {
+				box-sizing: border-box;
+			}
+			body {
+				margin: 0;
+				min-height: 100vh;
+				background:
+					radial-gradient(circle at 20% 0%, rgba(143, 214, 203, 0.14), transparent 25rem),
+					linear-gradient(180deg, #0a1420, var(--bg));
+				color: var(--text);
+			}
+			button,
+			input,
+			textarea,
+			select {
+				font: inherit;
+			}
+			button {
+				cursor: pointer;
+			}
+			.app {
+				width: min(1320px, calc(100% - 32px));
+				margin: 0 auto;
+				padding: 28px 0 40px;
+			}
+			.topbar {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 16px;
+				padding: 16px 0 24px;
+			}
+			.brand {
+				display: flex;
+				align-items: center;
+				gap: 12px;
+			}
+			.mark {
+				width: 36px;
+				height: 36px;
+				border-radius: 8px;
+				background: linear-gradient(135deg, var(--accent), #335f7a);
+				display: grid;
+				place-items: center;
+				color: #07111d;
+				font-weight: 900;
+			}
+			h1,
+			h2,
+			h3,
+			p {
+				margin: 0;
+			}
+			h1 {
+				font-size: 24px;
+				letter-spacing: 0;
+			}
+			.help {
+				margin-top: 4px;
+				color: var(--muted);
+				font-size: 13px;
+			}
+			.status {
+				min-height: 34px;
+				max-width: 520px;
+				padding: 7px 12px;
+				border: 1px solid var(--line);
+				border-radius: 8px;
+				color: var(--muted);
+				background: rgba(15, 28, 43, 0.78);
+			}
+			.status.good {
+				color: var(--accent);
+				border-color: rgba(143, 214, 203, 0.45);
+			}
+			.status.bad {
+				color: var(--danger);
+				border-color: rgba(239, 127, 127, 0.45);
+			}
+			.layout {
+				display: grid;
+				grid-template-columns: 220px 1fr;
+				gap: 16px;
+			}
+			.tabs {
+				position: sticky;
+				top: 16px;
+				align-self: start;
+				display: grid;
+				gap: 8px;
+			}
+			.tab {
+				border: 1px solid var(--line);
+				border-radius: 8px;
+				background: rgba(15, 28, 43, 0.82);
+				color: var(--muted);
+				padding: 11px 12px;
+				text-align: left;
+			}
+			.tab.active {
+				color: var(--text);
+				border-color: rgba(143, 214, 203, 0.7);
+				background: linear-gradient(135deg, rgba(143, 214, 203, 0.16), rgba(19, 36, 55, 0.92));
+			}
+			.panel {
+				border: 1px solid var(--line);
+				border-radius: 8px;
+				background: rgba(15, 28, 43, 0.9);
+				box-shadow: var(--shadow);
+				padding: 18px;
+			}
+			.panel + .panel {
+				margin-top: 16px;
+			}
+			.panel-header {
+				display: flex;
+				align-items: flex-start;
+				justify-content: space-between;
+				gap: 16px;
+				margin-bottom: 16px;
+			}
+			h2 {
+				font-size: 18px;
+				letter-spacing: 0;
+			}
+			h3 {
+				font-size: 14px;
+				margin-bottom: 10px;
+				color: var(--accent);
+			}
+			.grid {
+				display: grid;
+				grid-template-columns: repeat(2, minmax(0, 1fr));
+				gap: 14px;
+			}
+			.grid.three {
+				grid-template-columns: repeat(3, minmax(0, 1fr));
+			}
+			.field {
+				display: grid;
+				gap: 7px;
+			}
+			.field.full {
+				grid-column: 1 / -1;
+			}
+			label,
+			.label {
+				font-size: 13px;
+				color: var(--muted);
+			}
+			input,
+			textarea,
+			select {
+				width: 100%;
+				border: 1px solid var(--line);
+				border-radius: 8px;
+				background: var(--panel-3);
+				color: var(--text);
+				padding: 10px 11px;
+				outline: none;
+			}
+			textarea {
+				min-height: 96px;
+				resize: vertical;
+			}
+			input:focus,
+			textarea:focus,
+			select:focus {
+				border-color: rgba(143, 214, 203, 0.85);
+			}
+			input[type="range"] {
+				padding: 0;
+				accent-color: var(--accent);
+			}
+			.hue-row,
+			.volume-row {
+				display: grid;
+				grid-template-columns: 1fr 52px;
+				gap: 10px;
+				align-items: center;
+			}
+			.swatch {
+				height: 34px;
+				border-radius: 8px;
+				border: 1px solid var(--line);
+				background: hsl(var(--preview-hue), 72%, 58%);
+			}
+			.toggles {
+				display: grid;
+				grid-template-columns: repeat(5, minmax(0, 1fr));
+				gap: 10px;
+			}
+			.toggle {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 10px;
+				border: 1px solid var(--line);
+				border-radius: 8px;
+				padding: 10px;
+				background: var(--panel-3);
+				color: var(--text);
+			}
+			.toggle input {
+				width: 18px;
+				height: 18px;
+				accent-color: var(--accent);
+			}
+			.actions {
+				display: flex;
+				justify-content: flex-end;
+				gap: 10px;
+				margin-top: 18px;
+			}
+			.btn {
+				border: 1px solid var(--line);
+				border-radius: 8px;
+				background: var(--panel-2);
+				color: var(--text);
+				padding: 10px 14px;
+			}
+			.btn.small {
+				padding: 7px 9px;
+				font-size: 13px;
+			}
+			.btn.primary {
+				background: var(--accent);
+				color: #06111d;
+				border-color: var(--accent);
+				font-weight: 800;
+			}
+			.btn.danger {
+				border-color: rgba(239, 127, 127, 0.45);
+				color: #ffc7c7;
+				background: rgba(239, 127, 127, 0.12);
+			}
+			.block-columns {
+				display: grid;
+				grid-template-columns: repeat(3, minmax(0, 1fr));
+				gap: 14px;
+			}
+			.block-list {
+				display: grid;
+				gap: 10px;
+			}
+			.block-hint {
+				margin-bottom: 14px;
+			}
+			.block-row {
+				border: 1px solid var(--line);
+				border-radius: 8px;
+				background: rgba(9, 22, 38, 0.86);
+				padding: 10px;
+				display: grid;
+				gap: 10px;
+			}
+			.block-row.off {
+				opacity: 0.55;
+			}
+			.block-title {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 8px;
+			}
+			.block-name {
+				font-weight: 800;
+			}
+			.block-type {
+				color: var(--muted);
+				font-size: 12px;
+			}
+			.block-tools {
+				display: grid;
+				grid-template-columns: repeat(2, minmax(0, 1fr));
+				gap: 8px;
+			}
+			.block-tools.wide {
+				grid-template-columns: repeat(4, minmax(0, 1fr));
+			}
+			.preview-toolbar {
+				display: grid;
+				grid-template-columns: 1fr repeat(5, auto);
+				gap: 8px;
+				align-items: center;
+				margin-bottom: 14px;
+			}
+			.preview-grid {
+				display: grid;
+				grid-template-columns: minmax(0, 1fr) 420px;
+				gap: 16px;
+				align-items: start;
+			}
+			.preview-shell {
+				border: 1px solid var(--line);
+				border-radius: 8px;
+				background: #050b13;
+				overflow: hidden;
+			}
+			.preview-shell iframe {
+				display: block;
+				width: 100%;
+				height: 680px;
+				border: 0;
+				background: white;
+			}
+			.phone-shell {
+				width: min(100%, 390px);
+				margin: 0 auto;
+				border: 1px solid var(--line);
+				border-radius: 26px;
+				padding: 14px;
+				background: #050b13;
+			}
+			.phone-shell iframe {
+				display: block;
+				width: 100%;
+				height: 720px;
+				border: 0;
+				border-radius: 18px;
+				background: white;
+			}
+			.comment-provider.hidden,
+			.hidden {
+				display: none;
+			}
+			.note {
+				border: 1px solid rgba(143, 214, 203, 0.3);
+				border-radius: 8px;
+				background: rgba(143, 214, 203, 0.08);
+				color: var(--muted);
+				padding: 11px 12px;
+				line-height: 1.65;
+			}
+			.post-list {
+				display: grid;
+				gap: 8px;
+				max-height: 270px;
+				overflow: auto;
+				padding-right: 6px;
+			}
+			.post-manager {
+				display: grid;
+				gap: 8px;
+			}
+			.post-manager-toolbar,
+			.post-view-switch {
+				display: flex;
+				gap: 8px;
+				flex-wrap: wrap;
+				align-items: center;
+			}
+			.post-manager-toolbar input {
+				min-width: min(100%, 240px);
+				flex: 1 1 240px;
+			}
+			.post-manager-toolbar select {
+				flex: 0 1 150px;
+			}
+			.post-item-main {
+				min-width: 0;
+			}
+			.post-tags {
+				word-break: break-word;
+			}
+			.image-manager {
+				display: grid;
+				grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+				gap: 16px;
+			}
+			.image-preview {
+				width: 100%;
+				aspect-ratio: 16 / 9;
+				border: 1px solid var(--line);
+				border-radius: 8px;
+				background: var(--panel-3);
+				object-fit: cover;
+			}
+			.image-library {
+				display: grid;
+				grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+				gap: 10px;
+				max-height: 520px;
+				overflow: auto;
+				padding-right: 6px;
+			}
+			.image-card {
+				border: 1px solid var(--line);
+				border-radius: 8px;
+				background: rgba(9, 22, 38, 0.76);
+				overflow: hidden;
+			}
+			.image-card img {
+				display: block;
+				width: 100%;
+				aspect-ratio: 16 / 10;
+				object-fit: cover;
+				background: #050b13;
+			}
+			.image-card-body {
+				display: grid;
+				gap: 8px;
+				padding: 9px;
+			}
+			.path-pill {
+				color: var(--muted);
+				font-size: 11px;
+				line-height: 1.35;
+				word-break: break-all;
+			}
+			.image-actions {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 6px;
+			}
+			.image-actions .btn.small {
+				padding: 6px 7px;
+			}
+			.post-item {
+				border: 1px solid var(--line);
+				border-radius: 8px;
+				background: var(--panel-3);
+				padding: 10px 12px;
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 12px;
+			}
+			.post-actions {
+				display: flex;
+				align-items: center;
+				justify-content: flex-end;
+				flex-wrap: wrap;
+				gap: 8px;
+			}
+			.post-title {
+				font-weight: 700;
+			}
+			.empty-state {
+				border: 1px dashed var(--line);
+				border-radius: 8px;
+				color: var(--muted);
+				padding: 12px;
+				text-align: center;
+			}
+			.meta {
+				color: var(--muted);
+				font-size: 12px;
+				margin-top: 3px;
+			}
+			@media (max-width: 1080px) {
+				.preview-grid,
+				.block-columns,
+				.grid.three {
+					grid-template-columns: 1fr;
+				}
+				.preview-toolbar {
+					grid-template-columns: 1fr 1fr;
+				}
+				.image-manager {
+					grid-template-columns: 1fr;
+				}
+			}
+			@media (max-width: 820px) {
+				.app {
+					width: min(100% - 20px, 680px);
+					padding-top: 16px;
+				}
+				.topbar,
+				.panel-header {
+					align-items: flex-start;
+					flex-direction: column;
+				}
+				.layout {
+					grid-template-columns: 1fr;
+				}
+				.tabs {
+					position: static;
+					grid-template-columns: repeat(2, minmax(0, 1fr));
+				}
+				.grid,
+				.toggles {
+					grid-template-columns: 1fr;
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<main class="app">
+			<header class="topbar">
+				<div class="brand">
+					<div class="mark">B</div>
+					<div>
+						<h1>博客操作台</h1>
+						<p class="help">改设置、排板块、看预览、写文章，都在这里。</p>
+					</div>
+				</div>
+				<div id="status" class="status">连接中</div>
+			</header>
+
+			<div class="layout">
+				<nav class="tabs" aria-label="设置分类">
+					<button class="tab active" data-tab="site" type="button">站点</button>
+					<button class="tab" data-tab="profile" type="button">个人</button>
+					<button class="tab" data-tab="home" type="button">首页</button>
+					<button class="tab" data-tab="images" type="button">图片</button>
+					<button class="tab" data-tab="pages" type="button">页面</button>
+					<button class="tab" data-tab="layout" type="button">板块</button>
+					<button class="tab" data-tab="music" type="button">音乐</button>
+					<button class="tab" data-tab="comments" type="button">评论</button>
+					<button class="tab" data-tab="preview" type="button">预览</button>
+					<button class="tab" data-tab="posts" type="button">文章</button>
+				</nav>
+
+				<section>
+					<form id="settingsForm">
+						<div class="panel tab-panel" data-panel="site">
+							<div class="panel-header">
+								<div>
+									<h2>站点</h2>
+									<p class="help">这里是浏览器标题和公开地址。</p>
+								</div>
+							</div>
+							<div class="grid">
+								<div class="field">
+									<label for="site-title">站点名字</label>
+									<input id="site-title" data-path="site.title" />
+								</div>
+								<div class="field">
+									<label for="site-subtitle">副标题</label>
+									<input id="site-subtitle" data-path="site.subtitle" />
+								</div>
+								<div class="field full">
+									<label for="site-url">公开地址</label>
+									<input id="site-url" data-path="site.url" />
+								</div>
+								<div class="field full">
+									<label for="site-description">描述</label>
+									<textarea id="site-description" data-path="site.description"></textarea>
+								</div>
+								<div class="field">
+									<label for="theme-mode">默认模式</label>
+									<select id="theme-mode" data-path="theme.defaultMode">
+										<option value="system">跟随系统</option>
+										<option value="light">浅色</option>
+										<option value="dark">深色</option>
+									</select>
+								</div>
+							</div>
+						</div>
+
+						<div class="panel tab-panel hidden" data-panel="profile">
+							<div class="panel-header">
+								<div>
+									<h2>个人</h2>
+									<p class="help">头像、名字、介绍和外部链接。</p>
+								</div>
+							</div>
+							<div class="grid">
+								<div class="field">
+									<label for="profile-name">名字</label>
+									<input id="profile-name" data-path="profile.name" />
+								</div>
+								<div class="field">
+									<label for="profile-avatar">头像路径</label>
+									<input id="profile-avatar" data-path="profile.avatar" />
+								</div>
+								<div class="field full">
+									<label for="profile-bio">签名</label>
+									<textarea id="profile-bio" data-path="profile.bio"></textarea>
+								</div>
+								<div class="field">
+									<label for="profile-github">GitHub</label>
+									<input id="profile-github" data-path="profile.github" />
+								</div>
+								<div class="field">
+									<label for="profile-email">邮箱</label>
+									<input id="profile-email" data-path="profile.email" />
+								</div>
+							</div>
+						</div>
+
+						<div class="panel tab-panel hidden" data-panel="home">
+							<div class="panel-header">
+								<div>
+									<h2>首页</h2>
+									<p class="help">横幅标题和会轮换显示的句子。</p>
+								</div>
+							</div>
+							<div class="grid">
+								<div class="field full">
+									<label for="home-title">横幅标题</label>
+									<input id="home-title" data-path="home.title" />
+								</div>
+								<div class="field full">
+									<label for="home-subtitles">横幅副标题，一行一句</label>
+									<textarea id="home-subtitles" data-path="home.subtitles"></textarea>
+								</div>
+							</div>
+						</div>
+
+						<div class="panel tab-panel hidden" data-panel="images">
+							<div class="panel-header">
+								<div>
+									<h2>图片</h2>
+									<p class="help">上传后的图片会进入博客项目文件夹，部署到 GitHub 后也能看到。</p>
+								</div>
+								<button id="refreshImages" class="btn" type="button">刷新图片库</button>
+							</div>
+							<div class="image-manager">
+								<div class="grid">
+									<div class="field full">
+										<label for="image-target">上传后用在哪里</label>
+										<select id="image-target">
+											<option value="avatar">头像</option>
+											<option value="desktop">电脑首页壁纸</option>
+											<option value="mobile">手机首页壁纸</option>
+											<option value="article">文章封面</option>
+											<option value="public">普通公开图片</option>
+										</select>
+									</div>
+									<div class="field full">
+										<label for="image-file">选择图片</label>
+										<input id="image-file" type="file" accept="image/png,image/jpeg,image/webp,image/avif,image/gif,image/svg+xml" />
+									</div>
+									<div class="field full">
+										<label for="image-name">文件名，可不填</label>
+										<input id="image-name" placeholder="例如 my-cover.webp" />
+									</div>
+									<div class="field full">
+										<img id="imageUploadPreview" class="image-preview" alt="图片预览" />
+									</div>
+									<div class="field full">
+										<button id="uploadImage" class="btn primary" type="button">上传并套用</button>
+									</div>
+									<div class="field full">
+										<div class="note">
+											电脑壁纸和手机壁纸是一行一张图，刷新页面时会随机显示。文章封面可以在“文章”页单独填写，也可以先在这里设置默认封面。
+										</div>
+									</div>
+									<div class="field full">
+										<label for="image-desktop">电脑首页壁纸，一行一张</label>
+										<textarea id="image-desktop" data-path="images.wallpaperDesktop"></textarea>
+									</div>
+									<div class="field full">
+										<label for="image-mobile">手机首页壁纸，一行一张</label>
+										<textarea id="image-mobile" data-path="images.wallpaperMobile"></textarea>
+									</div>
+									<div class="field">
+										<label for="image-banner-position">首页壁纸位置</label>
+										<input id="image-banner-position" data-path="images.bannerPosition" placeholder="center 或 50% 30%" />
+									</div>
+									<div class="field">
+										<label for="image-fullscreen-position">全屏壁纸位置</label>
+										<input id="image-fullscreen-position" data-path="images.fullscreenPosition" placeholder="center" />
+									</div>
+									<div class="field full">
+										<label for="image-article-cover">文章默认封面</label>
+										<input id="image-article-cover" data-path="images.articleCover" placeholder="/assets/images/posts/cover.webp" />
+									</div>
+								</div>
+								<div>
+									<h3>项目图片库</h3>
+									<div id="imageLibrary" class="image-library"></div>
+								</div>
+							</div>
+						</div>
+
+						<div class="panel tab-panel hidden" data-panel="pages">
+							<div class="panel-header">
+								<div>
+									<h2>页面</h2>
+									<p class="help">打开或隐藏导航里的独立页面。</p>
+								</div>
+							</div>
+							<div class="toggles">
+								<label class="toggle">友链 <input type="checkbox" data-path="pages.friends" /></label>
+								<label class="toggle">赞助 <input type="checkbox" data-path="pages.sponsor" /></label>
+								<label class="toggle">留言 <input type="checkbox" data-path="pages.guestbook" /></label>
+								<label class="toggle">番组 <input type="checkbox" data-path="pages.bangumi" /></label>
+								<label class="toggle">相册 <input type="checkbox" data-path="pages.gallery" /></label>
+							</div>
+						</div>
+
+						<div class="panel tab-panel hidden" data-panel="layout">
+							<div class="panel-header">
+								<div>
+									<h2>板块</h2>
+									<p class="help">上移、下移、开关，电脑端还能在左右栏之间移动。</p>
+								</div>
+								<button id="resetBlocks" class="btn" type="button">恢复默认板块</button>
+							</div>
+							<div class="note block-hint">
+								左侧和右侧是电脑页面的侧边栏；手机底部是手机页面最下面显示的板块。改完顺序或开关之后，记得点右下角的“保存设置”。
+							</div>
+							<div class="block-columns">
+								<div>
+									<h3>电脑左侧</h3>
+									<div class="block-list" data-layout-list="left"></div>
+								</div>
+								<div>
+									<h3>电脑右侧</h3>
+									<div class="block-list" data-layout-list="right"></div>
+								</div>
+								<div>
+									<h3>手机底部</h3>
+									<div class="block-list" data-layout-list="mobile"></div>
+								</div>
+							</div>
+						</div>
+
+						<div class="panel tab-panel hidden" data-panel="music">
+							<div class="panel-header">
+								<div>
+									<h2>音乐</h2>
+									<p class="help">网易云歌单通常选“网易云 + 歌单”，然后填歌单 ID。</p>
+								</div>
+							</div>
+							<div class="grid three">
+								<label class="toggle">导航显示 <input type="checkbox" data-path="music.showInNavbar" /></label>
+								<label class="toggle">侧栏显示 <input type="checkbox" data-path="music.showInSidebar" /></label>
+								<label class="toggle">显示歌词 <input type="checkbox" data-path="music.showLyrics" /></label>
+								<div class="field">
+									<label for="music-mode">来源方式</label>
+									<select id="music-mode" data-path="music.mode">
+										<option value="meting">在线歌单</option>
+										<option value="local">本地音乐</option>
+									</select>
+								</div>
+								<div class="field">
+									<label for="music-server">平台</label>
+									<select id="music-server" data-path="music.server">
+										<option value="netease">网易云</option>
+										<option value="tencent">QQ 音乐</option>
+										<option value="kugou">酷狗</option>
+										<option value="xiami">虾米</option>
+										<option value="baidu">百度</option>
+									</select>
+								</div>
+								<div class="field">
+									<label for="music-type">类型</label>
+									<select id="music-type" data-path="music.type">
+										<option value="playlist">歌单</option>
+										<option value="song">单曲</option>
+										<option value="album">专辑</option>
+										<option value="artist">歌手</option>
+										<option value="search">搜索</option>
+									</select>
+								</div>
+								<div class="field">
+									<label for="music-id">ID 或关键词</label>
+									<input id="music-id" data-path="music.id" />
+								</div>
+								<div class="field">
+									<label for="music-play-mode">播放模式</label>
+									<select id="music-play-mode" data-path="music.playMode">
+										<option value="list">列表循环</option>
+										<option value="one">单曲循环</option>
+										<option value="random">随机播放</option>
+									</select>
+								</div>
+								<div class="field">
+									<label for="music-volume">默认音量</label>
+									<div class="volume-row">
+										<input id="music-volume" type="range" min="0" max="1" step="0.01" data-path="music.volume" />
+										<span id="volumeValue" class="label">70%</span>
+									</div>
+								</div>
+								<div class="field full">
+									<label for="music-api">Meting API</label>
+									<input id="music-api" data-path="music.api" />
+								</div>
+							</div>
+						</div>
+
+						<div class="panel tab-panel hidden" data-panel="comments">
+							<div class="panel-header">
+								<div>
+									<h2>评论</h2>
+									<p class="help">评论区入口已打开；真正能留言需要填好你选的评论服务。</p>
+								</div>
+							</div>
+							<div class="grid">
+								<label class="toggle">开启评论区 <input type="checkbox" data-path="comments.enabled" /></label>
+								<div class="field">
+									<label for="comments-type">评论服务</label>
+									<select id="comments-type" data-path="comments.type">
+										<option value="giscus">Giscus</option>
+										<option value="twikoo">Twikoo</option>
+										<option value="waline">Waline</option>
+										<option value="disqus">Disqus</option>
+										<option value="artalk">Artalk</option>
+										<option value="none">关闭</option>
+									</select>
+								</div>
+								<div class="field full comment-provider" data-comment-provider="giscus">
+									<div class="note">Giscus 适合部署到 GitHub Pages。需要在 GitHub 仓库开启 Discussions，再到 giscus.app 生成 repoId 和 categoryId。</div>
+								</div>
+								<div class="field comment-provider" data-comment-provider="giscus">
+									<label for="giscus-repo">仓库</label>
+									<input id="giscus-repo" data-path="comments.giscusRepo" />
+								</div>
+								<div class="field comment-provider" data-comment-provider="giscus">
+									<label for="giscus-repo-id">Repo ID</label>
+									<input id="giscus-repo-id" data-path="comments.giscusRepoId" />
+								</div>
+								<div class="field comment-provider" data-comment-provider="giscus">
+									<label for="giscus-category">分类</label>
+									<input id="giscus-category" data-path="comments.giscusCategory" />
+								</div>
+								<div class="field comment-provider" data-comment-provider="giscus">
+									<label for="giscus-category-id">Category ID</label>
+									<input id="giscus-category-id" data-path="comments.giscusCategoryId" />
+								</div>
+								<div class="field full comment-provider" data-comment-provider="twikoo">
+									<label for="twikoo-env">Twikoo 环境 ID</label>
+									<input id="twikoo-env" data-path="comments.twikooEnvId" />
+								</div>
+								<div class="field full comment-provider" data-comment-provider="waline">
+									<label for="waline-url">Waline 服务地址</label>
+									<input id="waline-url" data-path="comments.walineServerURL" />
+								</div>
+								<div class="field full comment-provider" data-comment-provider="disqus">
+									<label for="disqus-shortname">Disqus Shortname</label>
+									<input id="disqus-shortname" data-path="comments.disqusShortname" />
+								</div>
+								<div class="field full comment-provider" data-comment-provider="artalk">
+									<label for="artalk-server">Artalk 服务地址</label>
+									<input id="artalk-server" data-path="comments.artalkServer" />
+								</div>
+							</div>
+						</div>
+
+						<div class="panel tab-panel hidden" data-panel="preview">
+							<div class="panel-header">
+								<div>
+									<h2>预览</h2>
+									<p class="help">需要先运行博客预览窗口，也就是 4321 那个页面。</p>
+								</div>
+							</div>
+							<div class="preview-toolbar">
+								<input id="previewPath" value="/" aria-label="预览路径" />
+								<button class="btn small" data-preview-path="/" type="button">首页</button>
+								<button class="btn small" data-preview-path="/archives/" type="button">归档</button>
+								<button class="btn small" data-preview-path="/about/" type="button">关于</button>
+								<button class="btn small" data-preview-path="/friends/" type="button">友链</button>
+								<button id="refreshPreview" class="btn small" type="button">刷新</button>
+							</div>
+							<div class="preview-grid">
+								<div>
+									<h3>电脑页面</h3>
+									<div class="preview-shell">
+										<iframe id="desktopPreview" title="电脑预览"></iframe>
+									</div>
+								</div>
+								<div>
+									<h3>手机页面</h3>
+									<div class="phone-shell">
+										<iframe id="mobilePreview" title="手机预览"></iframe>
+									</div>
+								</div>
+							</div>
+						</div>
+
+						<div class="actions">
+							<button class="btn primary" type="submit">保存设置</button>
+						</div>
+					</form>
+
+					<div class="panel tab-panel hidden" data-panel="posts">
+						<div class="panel-header">
+							<div>
+								<h2>文章</h2>
+								<p class="help">这里适合快速创建草稿，之后再慢慢改正文。</p>
+							</div>
+							<button id="refreshPosts" class="btn" type="button">刷新列表</button>
+						</div>
+						<form id="postForm" class="studio-article-workspace">
+							<input id="editingPostPath" name="editingPath" type="hidden" />
+							<aside class="studio-article-library" aria-label="文章库">
+							<div class="field full post-manager">
+								<div class="post-manager-toolbar">
+									<input id="postSearch" type="search" placeholder="搜索标题、slug、分类或标签" />
+									<select id="postStateFilter">
+										<option value="all">全部文章</option>
+										<option value="published">已发布</option>
+										<option value="draft">草稿</option>
+										<option value="pinned">置顶</option>
+									</select>
+									<select id="postCategoryFilter"><option value="">全部分类</option></select>
+								</div>
+								<div class="post-view-switch" role="group" aria-label="文章视图">
+									<button class="btn small active" data-post-view="articles" type="button">文章</button>
+									<button class="btn small" data-post-view="trash" type="button">回收站</button>
+								</div>
+							</div>
+							<div class="field full post-library">
+								<label>已有文章</label>
+								<div id="postList" class="post-list"></div>
+							</div>
+							</aside>
+							<main class="studio-article-editor">
+								<section class="post-editor-main">
+									<div class="editor-context">
+										<div>
+											<strong id="editorContextTitle">新建文章</strong>
+											<div id="editorContextPath" class="meta">独立本地草稿</div>
+										</div>
+										<div class="editor-context-actions">
+											<button id="discardPostChanges" class="btn small" type="button">放弃修改</button>
+											<button id="postSubmitButton" class="btn primary" type="submit">保存文章</button>
+										</div>
+									</div>
+									<p class="editor-help">从左侧选择文章，或新建文章；正文会自动保存到本地草稿，点击“保存文章”才会写入文件。</p>
+									<div class="field">
+										<label for="post-title">标题</label>
+										<input id="post-title" name="title" />
+									</div>
+									<div class="editor-heading">
+										<label for="post-body">Markdown 正文</label>
+										<span id="editorDirtyState" class="editor-save-state" aria-live="polite">已保存</span>
+									</div>
+									<div class="markdown-toolbar" role="toolbar" aria-label="Markdown 工具栏">
+										<button class="btn small" data-editor-command="heading" type="button">标题</button>
+										<button class="btn small" data-editor-command="bold" type="button"><strong>B</strong></button>
+										<button class="btn small" data-editor-command="italic" type="button"><em>I</em></button>
+										<button class="btn small" data-editor-command="strike" type="button"><s>S</s></button>
+										<button class="btn small" data-editor-command="quote" type="button">引用</button>
+										<button class="btn small" data-editor-command="link" type="button">链接</button>
+										<button class="btn small" data-editor-command="image" type="button">图片</button>
+										<button class="btn small" data-editor-command="ul" type="button">无序列表</button>
+										<button class="btn small" data-editor-command="ol" type="button">有序列表</button>
+										<button class="btn small" data-editor-command="code" type="button">代码</button>
+										<button class="btn small" data-editor-command="codeblock" type="button">代码块</button>
+										<button class="btn small" data-editor-command="hr" type="button">分割线</button>
+									</div>
+									<textarea id="post-body" name="body" spellcheck="true">从这里开始写。</textarea>
+									<div id="editorStats" class="editor-stats" aria-live="polite">字符 0 · 中文 0 · 英文词 0 · 预计 1 分钟</div>
+								</section>
+							</main>
+							<aside class="studio-article-settings" aria-label="文章设置">
+								<div class="article-side-tabs" role="tablist" aria-label="文章右侧面板">
+									<button class="btn small active" type="button" role="tab" aria-selected="true" data-article-side-tab="settings">文章设置</button>
+									<button class="btn small" type="button" role="tab" aria-selected="false" data-article-side-tab="preview">实时预览</button>
+								</div>
+								<section class="article-side-panel" data-article-side-panel="settings">
+									<div class="post-settings">
+										<h3>文章设置</h3>
+										<div class="field">
+											<label for="post-slug">地址名</label>
+											<input id="post-slug" name="slug" />
+										</div>
+										<div class="field">
+											<label for="post-category">分类</label>
+											<input id="post-category" name="category" value="日常" />
+										</div>
+										<div class="field">
+											<label for="post-tags">标签</label>
+											<input id="post-tags" name="tags" placeholder="日记, 想法" />
+										</div>
+										<div class="field">
+											<label for="post-published">发布日期</label>
+											<input id="post-published" name="published" type="datetime-local" step="60" />
+											<p id="postPublishedHint" class="help">使用中国标准时间（Asia/Shanghai）。</p>
+										</div>
+										<div class="field">
+											<label for="post-image">封面图片</label>
+											<input id="post-image" name="image" placeholder="/assets/images/posts/cover.webp" readonly />
+											<div class="cover-actions">
+												<button id="choosePostCover" class="btn small" type="button">选择封面</button>
+												<button id="clearPostCover" class="btn small" type="button">清除封面</button>
+											</div>
+											<div id="postCoverPreview" class="article-cover-preview hidden">
+												<img id="postCoverPreviewImage" alt="当前文章封面预览" />
+												<div id="postCoverPreviewPath" class="path-pill"></div>
+											</div>
+											<p id="postCoverHint" class="cover-hint">图片会保留在图片库中；清除封面不会删除图片文件。</p>
+										</div>
+										<div class="field">
+											<label for="post-description">简介</label>
+											<textarea id="post-description" name="description" rows="4"></textarea>
+										</div>
+										<div class="post-checkboxes">
+											<label><input id="post-draft" name="draft" type="checkbox" checked /> 草稿</label>
+											<label><input id="post-pinned" name="pinned" type="checkbox" /> 置顶</label>
+											<label><input id="post-comment" name="comment" type="checkbox" checked /> 允许评论</label>
+										</div>
+										<div class="field">
+											<label>最后更新时间</label>
+											<output id="post-updated" class="readonly-output">尚未保存</output>
+										</div>
+									</div>
+									<div class="actions">
+										<button id="cancelPostEdit" class="btn hidden" type="button">取消编辑</button>
+									</div>
+								</section>
+								<section class="article-side-panel hidden article-preview-panel" data-article-side-panel="preview" aria-live="polite">
+									<div class="article-preview-controls">
+										<div class="article-preview-width" role="group" aria-label="预览宽度">
+											<button class="btn small active" type="button" data-preview-width="desktop">桌面</button>
+											<button class="btn small" type="button" data-preview-width="mobile">手机</button>
+										</div>
+										<span id="markdownPreviewStatus" class="preview-status">准备预览</span>
+									</div>
+									<div id="markdownPreviewViewport" class="markdown-preview-viewport" data-preview-width="desktop">
+										<div id="markdownPreview" class="markdown-preview-content">
+											<p class="preview-empty">正文内容会在这里实时预览。</p>
+										</div>
+									</div>
+									<p id="markdownPreviewWarnings" class="preview-warnings hidden" role="status"></p>
+									<p class="preview-note">实时预览主要保证基础 Markdown 内容正确；最终文章页还会应用站点排版、代码高亮及其他 Astro 增强效果。</p>
+								</section>
+							</aside>
+							</form>
+					</div>
+				</section>
+			</div>
+		</main>
+
+		<div id="articleImagePicker" class="studio-image-picker-backdrop hidden" aria-hidden="true">
+			<section class="studio-image-picker" role="dialog" aria-modal="true" aria-labelledby="articleImagePickerTitle">
+				<header class="image-picker-header">
+					<div>
+						<h2 id="articleImagePickerTitle">插入正文图片</h2>
+						<p>图片会保存为可部署的站内路径，不会写入电脑本地路径。</p>
+					</div>
+					<button id="closeArticleImagePicker" class="btn small" type="button" aria-label="关闭图片选择器">关闭</button>
+				</header>
+				<div class="image-picker-toolbar">
+					<input id="articleImageSearch" type="search" placeholder="搜索文件名或路径" />
+					<button id="refreshArticleImages" class="btn small" type="button">刷新图片库</button>
+				</div>
+				<div id="articleImagePickerState" class="image-picker-state" role="status">准备读取图片库。</div>
+				<div id="articleImageGrid" class="article-image-grid"></div>
+				<div class="article-image-upload">
+					<input id="articleImageUpload" type="file" accept=".png,.jpg,.jpeg,.webp,.avif,.gif,.svg" />
+					<button id="uploadArticleImage" class="btn small" type="button">上传图片</button>
+					<span id="articleImageUploadStatus" class="image-picker-state"></span>
+				</div>
+				<div id="articleImageAltField" class="field">
+					<label for="articleImageAlt">图片说明</label>
+					<input id="articleImageAlt" placeholder="用一句话描述图片" />
+				</div>
+				<footer class="image-picker-footer">
+					<span id="articleImageSelection" class="path-pill">尚未选择图片</span>
+					<div class="actions">
+						<button id="cancelArticleImagePicker" class="btn" type="button">取消</button>
+						<button id="confirmArticleImagePicker" class="btn primary" type="button" disabled>插入正文</button>
+					</div>
+				</footer>
+			</section>
+		</div>
+
+		<script>
+			const statusEl = document.querySelector("#status");
+			const form = document.querySelector("#settingsForm");
+			const hue = document.querySelector("#theme-hue");
+			const swatch = document.querySelector("#hueSwatch");
+			const volume = document.querySelector("#music-volume");
+			const volumeValue = document.querySelector("#volumeValue");
+			const previewPath = document.querySelector("#previewPath");
+			const desktopPreview = document.querySelector("#desktopPreview");
+			const mobilePreview = document.querySelector("#mobilePreview");
+			const imageTarget = document.querySelector("#image-target");
+			const imageFile = document.querySelector("#image-file");
+			const imageName = document.querySelector("#image-name");
+			const imageUploadPreview = document.querySelector("#imageUploadPreview");
+			const imageLibrary = document.querySelector("#imageLibrary");
+			const previewBaseUrl = "http://127.0.0.1:4321";
+			let settings = null;
+			let editingPostPath = "";
+			let imagesLoaded = false;
+			let posts = [];
+			let trashPosts = [];
+			let postView = "articles";
+
+			const blockLabels = {
+				profile: "个人卡片",
+				stats: "站点统计",
+				announcement: "公告",
+				music: "音乐播放器",
+				categories: "分类",
+				tags: "标签",
+				sidebarToc: "文章目录",
+				calendar: "日历",
+				siteInfo: "站点信息",
+			};
+
+			const defaultLayout = {
+				left: [
+					{ type: "profile", enable: true, position: "top" },
+					{ type: "stats", enable: true, position: "top" },
+					{ type: "announcement", enable: true, position: "top" },
+					{ type: "music", enable: true, position: "sticky" },
+					{ type: "categories", enable: true, position: "sticky" },
+					{ type: "tags", enable: true, position: "sticky" },
+				],
+				right: [
+					{ type: "sidebarToc", enable: true, position: "sticky" },
+					{ type: "calendar", enable: true, position: "sticky" },
+					{ type: "siteInfo", enable: false, position: "sticky" },
+				],
+				mobile: [
+					{ type: "profile", enable: true },
+					{ type: "stats", enable: true },
+					{ type: "announcement", enable: true },
+					{ type: "music", enable: true },
+					{ type: "categories", enable: true },
+					{ type: "tags", enable: true },
+				],
+			};
+			const listFields = new Set([
+				"home.subtitles",
+				"images.wallpaperDesktop",
+				"images.wallpaperMobile",
+			]);
+
+			function setStatus(text, type = "") {
+				statusEl.textContent = text;
+				statusEl.className = `status ${type}`.trim();
+			}
+
+			function clone(value) {
+				return JSON.parse(JSON.stringify(value));
+			}
+
+			function escapeHtml(value) {
+				return String(value ?? "")
+					.replaceAll("&", "&amp;")
+					.replaceAll("<", "&lt;")
+					.replaceAll(">", "&gt;")
+					.replaceAll('"', "&quot;");
+			}
+
+			function getPath(obj, path) {
+				return path.split(".").reduce((acc, key) => acc?.[key], obj);
+			}
+
+			function setPath(obj, path, value) {
+				const parts = path.split(".");
+				let cursor = obj;
+				for (const part of parts.slice(0, -1)) {
+					cursor[part] ||= {};
+					cursor = cursor[part];
+				}
+				cursor[parts.at(-1)] = value;
+			}
+
+			function paintHue() {
+				if (!hue) return;
+				document.documentElement.style.setProperty("--preview-hue", hue.value || 165);
+			}
+
+			function paintVolume() {
+				const percent = Math.round(Number(volume.value || 0) * 100);
+				volumeValue.textContent = `${percent}%`;
+			}
+
+			function renderCommentFields() {
+				const type = document.querySelector("#comments-type").value;
+				for (const field of document.querySelectorAll("[data-comment-provider]")) {
+					field.classList.toggle("hidden", field.dataset.commentProvider !== type);
+				}
+			}
+
+			function normalizeLayout() {
+				settings.layout ||= {};
+				const isEmpty =
+					!Array.isArray(settings.layout.left) &&
+					!Array.isArray(settings.layout.right) &&
+					!Array.isArray(settings.layout.mobile);
+				if (isEmpty) settings.layout = clone(defaultLayout);
+				settings.layout.left = Array.isArray(settings.layout.left)
+					? settings.layout.left
+					: clone(defaultLayout.left);
+				settings.layout.right = Array.isArray(settings.layout.right)
+					? settings.layout.right
+					: clone(defaultLayout.right);
+				settings.layout.mobile = Array.isArray(settings.layout.mobile)
+					? settings.layout.mobile
+					: clone(defaultLayout.mobile);
+			}
+
+			function renderBlockList(key) {
+				const list = settings.layout[key] || [];
+				const container = document.querySelector(`[data-layout-list="${key}"]`);
+				const isMobile = key === "mobile";
+				if (!list.length) {
+					container.innerHTML = `<div class="empty-state">这里现在没有板块，可以点“恢复默认板块”。</div>`;
+					return;
+				}
+				container.innerHTML = list
+					.map((item, index) => {
+						const label = blockLabels[item.type] || item.type;
+						const positionSelect = isMobile
+							? ""
+							: `<select data-block-field="position" data-layout-key="${key}" data-index="${index}">
+									<option value="top" ${item.position === "top" ? "selected" : ""}>靠上</option>
+									<option value="sticky" ${item.position !== "top" ? "selected" : ""}>跟随滚动</option>
+								</select>`;
+						const zoneSelect = isMobile
+							? ""
+							: `<select data-block-field="zone" data-layout-key="${key}" data-index="${index}">
+									<option value="left" ${key === "left" ? "selected" : ""}>左侧</option>
+									<option value="right" ${key === "right" ? "selected" : ""}>右侧</option>
+								</select>`;
+						return `
+							<div class="block-row ${item.enable ? "" : "off"}">
+								<div class="block-title">
+									<div>
+										<div class="block-name">${escapeHtml(label)}</div>
+										<div class="block-type">${escapeHtml(item.type)}</div>
+									</div>
+									<button class="btn small" data-block-action="toggle" data-layout-key="${key}" data-index="${index}" type="button">
+										${item.enable ? "关闭" : "开启"}
+									</button>
+								</div>
+								${positionSelect}
+								${zoneSelect}
+								<div class="block-tools ${isMobile ? "" : "wide"}">
+									<button class="btn small" data-block-action="up" data-layout-key="${key}" data-index="${index}" type="button">上移</button>
+									<button class="btn small" data-block-action="down" data-layout-key="${key}" data-index="${index}" type="button">下移</button>
+								</div>
+							</div>
+						`;
+					})
+					.join("");
+			}
+
+			function renderBlocks() {
+				normalizeLayout();
+				renderBlockList("left");
+				renderBlockList("right");
+				renderBlockList("mobile");
+			}
+
+			function fillForm() {
+				for (const input of form.querySelectorAll("[data-path]")) {
+					const value = getPath(settings, input.dataset.path);
+					if (input.type === "checkbox") input.checked = Boolean(value);
+					else if (listFields.has(input.dataset.path)) input.value = (value || []).join("\n");
+					else input.value = value ?? "";
+				}
+				paintHue();
+				paintVolume();
+				renderBlocks();
+				renderCommentFields();
+				updatePreview();
+			}
+
+			function collectForm() {
+				const next = clone(settings);
+				for (const input of form.querySelectorAll("[data-path]")) {
+					let value = input.value;
+					if (input.type === "checkbox") value = input.checked;
+					if (input.type === "range") value = Number(input.value);
+					if (listFields.has(input.dataset.path)) {
+						value = input.value
+							.split("\n")
+							.map((line) => line.trim())
+							.filter(Boolean);
+					}
+					setPath(next, input.dataset.path, value);
+				}
+				next.layout = clone(settings.layout);
+				return next;
+			}
+
+			function normalizePreviewPath(path) {
+				const clean = String(path || "/").trim();
+				if (!clean.startsWith("/")) return `/${clean}`;
+				return clean;
+			}
+
+			function localPostDate() {
+				const parts = new Intl.DateTimeFormat("en-CA", {
+					timeZone: "Asia/Shanghai",
+					year: "numeric",
+					month: "2-digit",
+					day: "2-digit",
+					hour: "2-digit",
+					minute: "2-digit",
+					hourCycle: "h23",
+				}).formatToParts(new Date());
+				const value = (type) => parts.find((part) => part.type === type)?.value || "";
+				return `${value("year")}-${value("month")}-${value("day")}T${value("hour")}:${value("minute")}`;
+			}
+
+			function updatePreview() {
+				const path = normalizePreviewPath(previewPath.value);
+				const src = `${previewBaseUrl}${path}`;
+				desktopPreview.src = src;
+				mobilePreview.src = src;
+			}
+
+			function readImageAsDataUrl(file) {
+				return new Promise((resolve, reject) => {
+					const reader = new FileReader();
+					reader.onload = () => resolve(reader.result);
+					reader.onerror = () => reject(new Error("读取图片失败"));
+					reader.readAsDataURL(file);
+				});
+			}
+
+			function appendLineValue(selector, value) {
+				const input = document.querySelector(selector);
+				const lines = input.value
+					.split("\n")
+					.map((line) => line.trim())
+					.filter(Boolean);
+				if (!lines.includes(value)) lines.push(value);
+				input.value = lines.join("\n");
+			}
+
+			function applyImagePath(path, target) {
+				if (target === "avatar") {
+					document.querySelector('[data-path="profile.avatar"]').value = path;
+				}
+				if (target === "desktop") {
+					appendLineValue('[data-path="images.wallpaperDesktop"]', path);
+				}
+				if (target === "mobile") {
+					appendLineValue('[data-path="images.wallpaperMobile"]', path);
+				}
+				if (target === "article") {
+					document.querySelector('[data-path="images.articleCover"]').value = path;
+					const postImage = document.querySelector("#post-image");
+					if (postImage && !postImage.value) postImage.value = path;
+				}
+			}
+
+			async function copyImagePath(path) {
+				try {
+					await navigator.clipboard.writeText(path);
+					setStatus("图片路径已复制", "good");
+				} catch {
+					setStatus(path, "good");
+				}
+			}
+
+			function renderImageLibrary(images) {
+				if (!images.length) {
+					imageLibrary.innerHTML = `<div class="empty-state">还没有找到图片。</div>`;
+					return;
+				}
+				imageLibrary.innerHTML = images
+					.map((image) => {
+						const safePath = escapeHtml(image.path);
+						return `
+							<div class="image-card">
+								<img src="${escapeHtml(image.previewUrl)}" alt="${escapeHtml(image.name)}" loading="lazy" />
+								<div class="image-card-body">
+									<div class="path-pill">${safePath}</div>
+									<div class="image-actions">
+										<button class="btn small" data-image-action="avatar" data-image-path="${safePath}" type="button">头像</button>
+										<button class="btn small" data-image-action="desktop" data-image-path="${safePath}" type="button">电脑壁纸</button>
+										<button class="btn small" data-image-action="mobile" data-image-path="${safePath}" type="button">手机壁纸</button>
+										<button class="btn small" data-image-action="article" data-image-path="${safePath}" type="button">文章封面</button>
+										<button class="btn small" data-image-action="copy" data-image-path="${safePath}" type="button">复制路径</button>
+									</div>
+								</div>
+							</div>
+						`;
+					})
+					.join("");
+			}
+
+			async function loadImages(force = false) {
+				if (imagesLoaded && !force) return;
+				const res = await fetch("/api/images");
+				if (!res.ok) throw new Error("读取图片库失败");
+				renderImageLibrary(await res.json());
+				imagesLoaded = true;
+			}
+
+			async function uploadSelectedImage() {
+				const file = imageFile.files?.[0];
+				if (!file) throw new Error("先选择一张图片");
+				setStatus("上传图片中");
+				const res = await fetch("/api/images", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						target: imageTarget.value,
+						filename: imageName.value || file.name,
+						dataUrl: await readImageAsDataUrl(file),
+					}),
+				});
+				if (!res.ok) {
+					const err = await res.json().catch(() => ({}));
+					throw new Error(err.error || "上传图片失败");
+				}
+				const image = await res.json();
+				applyImagePath(image.path, imageTarget.value);
+				await loadImages(true);
+				setStatus("图片已上传并填入对应位置，记得保存设置", "good");
+			}
+
+			async function loadSettings() {
+				const res = await fetch("/api/settings");
+				if (!res.ok) throw new Error("读取设置失败");
+				settings = await res.json();
+				fillForm();
+				setStatus("已连接", "good");
+			}
+
+			async function saveSettings(event) {
+				event.preventDefault();
+				setStatus("保存中");
+				const res = await fetch("/api/settings", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(collectForm()),
+				});
+				if (!res.ok) {
+					const data = await res.json().catch(() => ({}));
+					throw new Error(data.error || "保存失败");
+				}
+				settings = await res.json();
+				fillForm();
+				setStatus("已保存，预览页会自动刷新", "good");
+			}
+
+			async function legacyLoadPosts() {
+				const res = await fetch("/api/posts");
+				if (!res.ok) throw new Error("读取文章失败");
+				const posts = await res.json();
+				const list = document.querySelector("#postList");
+				if (!posts.length) {
+					list.innerHTML = `<div class="empty-state">还没有文章。</div>`;
+					return;
+				}
+				list.innerHTML = posts
+					.map(
+						(post) => `
+							<div class="post-item ${editingPostPath === post.path ? "active" : ""}" data-post-card data-post-path="${escapeHtml(post.path)}" tabindex="0">
+								<div>
+									<div class="post-title">${escapeHtml(post.title)}</div>
+									<div class="meta">${escapeHtml(post.published || "未设置日期")} · ${escapeHtml(post.category || "未分类")}</div>
+									<div class="meta">${escapeHtml(post.path)}</div>
+								</div>
+								<div class="post-actions">
+									<button class="btn small" data-post-action="edit" data-post-path="${escapeHtml(post.path)}" type="button">编辑</button>
+									<button class="btn small danger" data-post-action="delete" data-post-path="${escapeHtml(post.path)}" data-post-title="${escapeHtml(post.title)}" type="button">移到回收站</button>
+								</div>
+							</div>
+						`,
+					)
+					.join("");
+			}
+
+			function formatPostDate(value, fallback = "未设置") {
+				const formatted = window.StudioEditor?.formatTimestamp?.(value) || value;
+				return formatted ? escapeHtml(formatted) : fallback;
+			}
+
+			function updatePostCategories() {
+				const select = document.querySelector("#postCategoryFilter");
+				const selected = select.value;
+				const categories = [...new Set(posts.map((post) => String(post.category || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+				select.innerHTML = `<option value="">全部分类</option>${categories
+					.map((category) => `<option value="${escapeHtml(category)}">${escapeHtml(category)}</option>`)
+					.join("")}`;
+				select.value = categories.includes(selected) ? selected : "";
+			}
+
+			function filteredPosts() {
+				const query = document.querySelector("#postSearch").value.trim().toLocaleLowerCase();
+				const state = document.querySelector("#postStateFilter").value;
+				const category = document.querySelector("#postCategoryFilter").value;
+				return posts.filter((post) => {
+					const searchable = [post.title, post.slug, post.category, ...(post.tags || [])]
+						.join(" ")
+						.toLocaleLowerCase();
+					if (query && !searchable.includes(query)) return false;
+					if (category && post.category !== category) return false;
+					if (state === "published" && post.draft) return false;
+					if (state === "draft" && !post.draft) return false;
+					if (state === "pinned" && !post.pinned) return false;
+					return true;
+				});
+			}
+
+			function renderPostList() {
+				const list = document.querySelector("#postList");
+				if (postView === "trash") {
+					renderTrashList();
+					return;
+				}
+				const visiblePosts = filteredPosts();
+				if (!visiblePosts.length) {
+					list.innerHTML = `<div class="empty-state">没有符合当前搜索或筛选条件的文章。</div>`;
+					return;
+				}
+				list.innerHTML = visiblePosts
+					.map((post) => {
+						const tags = (post.tags || []).map((tag) => `#${escapeHtml(tag)}`).join(" ") || "无标签";
+						const status = post.draft ? "草稿" : "已发布";
+						const pinned = post.pinned ? " · 置顶" : "";
+						return `
+							<div class="post-item ${editingPostPath === post.path ? "active" : ""}" data-post-card data-post-path="${escapeHtml(post.path)}" tabindex="0">
+								<div class="post-item-main">
+									<div class="post-title">${escapeHtml(post.title)}</div>
+									<div class="meta">${escapeHtml(status)}${pinned} · slug: ${escapeHtml(post.slug || "")}</div>
+									<div class="meta">分类：${escapeHtml(post.category || "未分类")} · <span class="post-tags">${tags}</span></div>
+									<div class="meta">发布时间：${formatPostDate(post.published)} · 最后修改：${formatPostDate(post.updated, "未修改")}</div>
+									<div class="meta">${escapeHtml(post.path)}</div>
+								</div>
+								<div class="post-actions">
+									<button class="btn small" data-post-action="edit" data-post-path="${escapeHtml(post.path)}" type="button">编辑</button>
+									<button class="btn small" data-post-action="copy" data-post-path="${escapeHtml(post.path)}" data-post-title="${escapeHtml(post.title)}" type="button">复制</button>
+									<button class="btn small" data-post-action="open" data-post-slug="${escapeHtml(post.slug || "")}" type="button">打开前台</button>
+									<button class="btn small danger" data-post-action="delete" data-post-path="${escapeHtml(post.path)}" data-post-title="${escapeHtml(post.title)}" type="button">移入回收站</button>
+								</div>
+							</div>
+						`;
+					})
+					.join("");
+			}
+
+			function renderTrashList() {
+				const list = document.querySelector("#postList");
+				if (!trashPosts.length) {
+					list.innerHTML = `<div class="empty-state">回收站目前是空的。</div>`;
+					return;
+				}
+				list.innerHTML = trashPosts
+					.map(
+						(item) => `
+							<div class="post-item">
+								<div class="post-item-main">
+									<div class="post-title">${escapeHtml(item.title || "未命名文章")}</div>
+									<div class="meta">删除时间：${formatPostDate(item.deletedAt)}</div>
+									<div class="meta">原路径：${escapeHtml(item.originalPostPath || "")}</div>
+									<div class="meta">回收项目 ID：${escapeHtml(item.trashPath || "")}</div>
+								</div>
+								<div class="post-actions">
+									<button class="btn small" data-post-action="restore" data-trash-path="${escapeHtml(item.trashPath)}" data-post-title="${escapeHtml(item.title || item.originalPostPath)}" type="button">恢复</button>
+								</div>
+							</div>
+						`,
+					)
+					.join("");
+			}
+
+			async function loadPosts() {
+				const res = await fetch("/api/posts");
+				if (!res.ok) throw new Error("读取文章失败");
+				posts = await res.json();
+				updatePostCategories();
+				renderPostList();
+			}
+
+			async function loadTrash() {
+				const res = await fetch("/api/posts/trash");
+				if (!res.ok) {
+					const err = await res.json().catch(() => ({}));
+					throw new Error(err.error || "读取回收站失败");
+				}
+				trashPosts = await res.json();
+				renderPostList();
+			}
+
+			async function switchPostView(nextView) {
+				const canLeave = window.StudioEditor ? await window.StudioEditor.confirmNavigation("回收站") : true;
+				if (nextView !== postView && !canLeave) return;
+				postView = nextView;
+				for (const button of document.querySelectorAll("[data-post-view]")) {
+					button.classList.toggle("active", button.dataset.postView === nextView);
+				}
+				if (nextView === "trash") loadTrash().catch((err) => setStatus(err.message, "bad"));
+				else loadPosts().catch((err) => setStatus(err.message, "bad"));
+			}
+
+			async function copyPost(path, title) {
+				setStatus(`正在复制《${title || path}》`);
+				const res = await fetch("/api/posts/copy", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ path }),
+				});
+				if (!res.ok) {
+					const err = await res.json().catch(() => ({}));
+					throw new Error(err.error || "复制文章失败");
+				}
+				const copied = await res.json();
+				await loadPosts();
+				setStatus(`已创建草稿《${copied.title}》`, "good");
+			}
+
+			function openPost(slug) {
+				const encodedSlug = String(slug || "")
+					.split("/")
+					.filter(Boolean)
+					.map((part) => encodeURIComponent(part))
+					.join("/");
+				if (!encodedSlug) throw new Error("文章缺少可打开的 slug");
+				window.open(`${previewBaseUrl}/posts/${encodedSlug}/`, "_blank", "noopener");
+			}
+
+			async function restorePost(trashPath, title) {
+				setStatus(`正在恢复《${title || trashPath}》`);
+				const res = await fetch("/api/posts/restore", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ trashPath }),
+				});
+				if (!res.ok) {
+					const err = await res.json().catch(() => ({}));
+					throw new Error(err.error || "恢复文章失败");
+				}
+				await loadTrash();
+				setStatus(`已恢复《${title || trashPath}》`, "good");
+			}
+
+			async function resetPostForm({ skipGuard = false } = {}) {
+				if (!skipGuard && window.StudioEditor && !(await window.StudioEditor.confirmNavigation("新文章"))) return false;
+				editingPostPath = "";
+				document.querySelector("#editingPostPath").value = "";
+				document.querySelector("#postForm").reset();
+				document.querySelector("#post-category").value = "日常";
+				document.querySelector("#post-image").value = settings?.images?.articleCover || "";
+				document.querySelector("#post-body").value = "从这里开始写。";
+				document.querySelector("#post-published").value = localPostDate();
+				document.querySelector("#post-draft").checked = true;
+				document.querySelector("#post-pinned").checked = false;
+				document.querySelector("#post-comment").checked = true;
+				document.querySelector("#post-updated").value = "尚未保存";
+				document.querySelector("#post-slug").disabled = false;
+				document.querySelector("#postSubmitButton").textContent = "保存文章";
+				document.querySelector("#cancelPostEdit").classList.add("hidden");
+				await window.StudioEditor?.beginNewDraft();
+				renderPostList();
+				return true;
+			}
+
+			async function editPost(path) {
+				if (window.StudioEditor && !(await window.StudioEditor.confirmNavigation("另一篇文章"))) return;
+				setStatus("读取文章中");
+				const res = await fetch(`/api/posts?path=${encodeURIComponent(path)}`);
+				if (!res.ok) {
+					const err = await res.json().catch(() => ({}));
+					throw new Error(err.error || "读取文章失败");
+				}
+				const post = await res.json();
+				editingPostPath = post.path;
+				document.querySelector("#editingPostPath").value = post.path;
+				document.querySelector("#post-title").value = post.title || "";
+				document.querySelector("#post-slug").value = post.slug || "";
+				document.querySelector("#post-slug").disabled = true;
+				document.querySelector("#post-category").value = post.category || "日常";
+				document.querySelector("#post-tags").value = (post.tags || []).join(", ");
+				document.querySelector("#post-description").value = post.description || "";
+				document.querySelector("#post-image").value = post.image || "";
+				document.querySelector("#post-published").value = post.published || "";
+				document.querySelector("#post-draft").checked = Boolean(post.draft);
+				document.querySelector("#post-pinned").checked = Boolean(post.pinned);
+				document.querySelector("#post-comment").checked = post.comment !== false;
+				document.querySelector("#post-updated").value = post.updated || "尚未保存";
+				document.querySelector("#post-body").value = post.body || "";
+				document.querySelector("#postSubmitButton").textContent = "保存文章";
+				document.querySelector("#cancelPostEdit").classList.remove("hidden");
+				await window.StudioEditor?.loadServerPost(post);
+				renderPostList();
+				setStatus("正在编辑文章，地址名暂时保持不变", "good");
+				document.querySelector("#post-title").focus();
+			}
+
+			async function legacyDeletePost(path, title) {
+				if (!confirm(`把《${title || path}》移到回收站吗？`)) return;
+				setStatus("移动到回收站中");
+				const res = await fetch(`/api/posts?path=${encodeURIComponent(path)}`, {
+					method: "DELETE",
+				});
+				if (!res.ok) {
+					const err = await res.json().catch(() => ({}));
+					throw new Error(err.error || "删除失败");
+				}
+				if (editingPostPath === path) resetPostForm();
+				await loadPosts();
+				setStatus("文章已移到回收站", "good");
+			}
+
+			async function deletePost(path, title) {
+				if (editingPostPath === path && window.StudioEditor && !(await window.StudioEditor.confirmNavigation("删除当前文章"))) return;
+				const name = title || path;
+				if (!confirm(`确认将《${name}》移入回收站吗？`)) return;
+				if (!confirm(`再次确认：文章《${name}》会从文章列表移入回收站。`)) return;
+				setStatus("移动到回收站中");
+				const res = await fetch(`/api/posts?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+				if (!res.ok) {
+					const err = await res.json().catch(() => ({}));
+					throw new Error(err.error || "删除文章失败");
+				}
+				if (editingPostPath === path) await resetPostForm({ skipGuard: true });
+				await loadPosts();
+				setStatus(`《${name}》已移入回收站`, "good");
+			}
+
+			async function savePost(event) {
+				event.preventDefault();
+				const isEditing = Boolean(editingPostPath);
+				const formData = new FormData(event.currentTarget);
+				const fallbackData = Object.fromEntries(formData.entries());
+				const data = window.StudioEditor
+					? window.StudioEditor.preparePayload({ isEditing })
+					: {
+						...fallbackData,
+						draft: document.querySelector("#post-draft").checked,
+						pinned: document.querySelector("#post-pinned").checked,
+						comment: document.querySelector("#post-comment").checked,
+						published: document.querySelector("#post-published").value,
+					};
+				setStatus(isEditing ? "保存文章中" : "新建文章中");
+				const endpoint = isEditing
+					? `/api/posts?path=${encodeURIComponent(editingPostPath)}`
+					: "/api/posts";
+				const res = await fetch(endpoint, {
+					method: isEditing ? "PUT" : "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(data),
+				});
+				if (!res.ok) {
+					const err = await res.json().catch(() => ({}));
+					throw new Error(err.error || (isEditing ? "保存失败" : "新建失败"));
+				}
+				const saved = await res.json();
+				let savedPost = saved;
+				if (!isEditing) {
+					const postPath = `${saved.slug}/index.md`;
+					const postRes = await fetch(`/api/posts?path=${encodeURIComponent(postPath)}`);
+					if (!postRes.ok) throw new Error("文章已创建，但无法读取保存后的版本");
+					savedPost = await postRes.json();
+					editingPostPath = savedPost.path;
+					document.querySelector("#editingPostPath").value = savedPost.path;
+					document.querySelector("#post-slug").value = savedPost.slug || saved.slug;
+					document.querySelector("#post-slug").disabled = true;
+					document.querySelector("#postSubmitButton").textContent = "保存文章";
+					document.querySelector("#cancelPostEdit").classList.remove("hidden");
+				}
+				await window.StudioEditor?.markSaved(savedPost);
+				await loadPosts();
+				setStatus(isEditing ? "文章已保存" : "文章已创建", "good");
+			}
+
+			for (const tab of document.querySelectorAll(".tab")) {
+				tab.addEventListener("click", () => {
+					for (const item of document.querySelectorAll(".tab")) item.classList.remove("active");
+					for (const panel of document.querySelectorAll(".tab-panel")) panel.classList.add("hidden");
+					tab.classList.add("active");
+					document.querySelector(`[data-panel="${tab.dataset.tab}"]`).classList.remove("hidden");
+					if (tab.dataset.tab === "images") loadImages().catch((err) => setStatus(err.message, "bad"));
+					if (tab.dataset.tab === "posts") loadPosts().catch((err) => setStatus(err.message, "bad"));
+					if (tab.dataset.tab === "preview") updatePreview();
+				});
+			}
+
+			document.addEventListener("click", (event) => {
+				const imageButton = event.target.closest("[data-image-action]");
+				if (imageButton) {
+					const path = imageButton.dataset.imagePath;
+					const action = imageButton.dataset.imageAction;
+					if (action === "copy") copyImagePath(path);
+					else {
+						applyImagePath(path, action);
+						setStatus("图片路径已填入，记得保存设置", "good");
+					}
+					return;
+				}
+
+				const postButton = event.target.closest("[data-post-action]");
+				if (postButton) {
+					const path = postButton.dataset.postPath;
+					const title = postButton.dataset.postTitle || path;
+					if (postButton.dataset.postAction === "edit") {
+						editPost(path).catch((err) => setStatus(err.message, "bad"));
+					}
+					if (postButton.dataset.postAction === "copy") {
+						copyPost(path, title).catch((err) => setStatus(err.message, "bad"));
+					}
+					if (postButton.dataset.postAction === "open") {
+						try {
+							openPost(postButton.dataset.postSlug);
+						} catch (err) {
+							setStatus(err.message, "bad");
+						}
+					}
+					if (postButton.dataset.postAction === "delete") {
+						deletePost(path, title).catch((err) => setStatus(err.message, "bad"));
+					}
+					if (postButton.dataset.postAction === "restore") {
+						restorePost(postButton.dataset.trashPath, title).catch((err) => setStatus(err.message, "bad"));
+					}
+					return;
+				}
+
+				const postCard = event.target.closest("[data-post-card]");
+				if (postCard) {
+					editPost(postCard.dataset.postPath).catch((err) => setStatus(err.message, "bad"));
+					return;
+				}
+
+				const actionButton = event.target.closest("[data-block-action]");
+				if (!actionButton || !settings) return;
+				const key = actionButton.dataset.layoutKey;
+				const index = Number(actionButton.dataset.index);
+				const list = settings.layout[key];
+				const action = actionButton.dataset.blockAction;
+				if (!list || !list[index]) return;
+
+				if (action === "toggle") {
+					list[index].enable = !list[index].enable;
+				}
+				if (action === "up" && index > 0) {
+					[list[index - 1], list[index]] = [list[index], list[index - 1]];
+				}
+				if (action === "down" && index < list.length - 1) {
+					[list[index], list[index + 1]] = [list[index + 1], list[index]];
+				}
+				renderBlocks();
+			});
+
+			document.addEventListener("change", (event) => {
+				const field = event.target.closest("[data-block-field]");
+				if (!field || !settings) return;
+				const key = field.dataset.layoutKey;
+				const index = Number(field.dataset.index);
+				const list = settings.layout[key];
+				if (!list || !list[index]) return;
+
+				if (field.dataset.blockField === "position") {
+					list[index].position = field.value;
+				}
+				if (field.dataset.blockField === "zone" && field.value !== key) {
+					const [item] = list.splice(index, 1);
+					settings.layout[field.value].push(item);
+				}
+				renderBlocks();
+			});
+
+			for (const button of document.querySelectorAll("[data-preview-path]")) {
+				button.addEventListener("click", () => {
+					previewPath.value = button.dataset.previewPath;
+					updatePreview();
+				});
+			}
+
+			hue?.addEventListener("input", paintHue);
+			volume.addEventListener("input", paintVolume);
+			previewPath.addEventListener("change", updatePreview);
+			imageFile.addEventListener("change", () => {
+				const file = imageFile.files?.[0];
+				imageUploadPreview.src = file ? URL.createObjectURL(file) : "";
+				if (file && !imageName.value) imageName.value = file.name;
+			});
+			document.querySelector("#comments-type").addEventListener("change", renderCommentFields);
+			document.querySelector("#refreshPreview").addEventListener("click", updatePreview);
+			document.querySelector("#refreshImages").addEventListener("click", () => loadImages(true).catch((err) => setStatus(err.message, "bad")));
+			document.querySelector("#uploadImage").addEventListener("click", () => uploadSelectedImage().catch((err) => setStatus(err.message, "bad")));
+			document.querySelector("#resetBlocks").addEventListener("click", () => {
+				if (!settings) return;
+				settings.layout = clone(defaultLayout);
+				renderBlocks();
+				setStatus("板块已恢复默认，记得保存设置", "good");
+			});
+			form.addEventListener("submit", (event) => saveSettings(event).catch((err) => setStatus(err.message, "bad")));
+			document.querySelector("#postForm").addEventListener("submit", (event) => savePost(event).catch((err) => setStatus(err.message, "bad")));
+			document.querySelector("#cancelPostEdit").addEventListener("click", () => {
+				resetPostForm().catch((err) => setStatus(err.message, "bad"));
+			});
+			document.querySelector("#discardPostChanges").addEventListener("click", () => {
+				window.StudioEditor?.discardChanges().catch((err) => setStatus(err.message, "bad"));
+			});
+			document.querySelector("#postSearch").addEventListener("input", renderPostList);
+			document.querySelector("#postStateFilter").addEventListener("change", renderPostList);
+			document.querySelector("#postCategoryFilter").addEventListener("change", renderPostList);
+			for (const button of document.querySelectorAll("[data-post-view]")) {
+				button.addEventListener("click", () => switchPostView(button.dataset.postView).catch((err) => setStatus(err.message, "bad")));
+			}
+			window.addEventListener("studio-editor-save-request", () => {
+				document.querySelector("#postForm").requestSubmit();
+			});
+			window.addEventListener("studio-editor-warning", (event) => {
+				setStatus(event.detail, "bad");
+			});
+			window.addEventListener("load", () => {
+				setTimeout(() => {
+					if (!window.StudioEditor) setStatus("文章编辑模块未加载，请重新启动博客操作台。", "bad");
+				}, 500);
+			});
+			document.querySelector("#refreshPosts").addEventListener("click", () => {
+				(postView === "trash" ? loadTrash() : loadPosts()).catch((err) => setStatus(err.message, "bad"));
+			});
+
+			loadSettings().catch((err) => setStatus(err.message, "bad"));
+		</script>
+		<script>
+			(async () => {
+				try {
+					const response = await fetch("./studio-editor.js", { cache: "no-store" });
+					if (!response.ok) throw new Error("无法读取编辑器脚本");
+					const script = document.createElement("script");
+					script.textContent = await response.text();
+					document.body.append(script);
+				} catch (error) {
+					const status = document.querySelector("#status");
+					if (status) {
+						status.textContent = `文章编辑模块加载失败：${error.message || "未知错误"}`;
+						status.className = "status bad";
+					}
+				}
+			})();
+		</script>
+	</body>
+</html>

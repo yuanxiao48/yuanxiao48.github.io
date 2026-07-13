@@ -3,12 +3,16 @@ import { Icon } from "astro-icon/components";
 import { commentConfig } from "@/config";
 import I18nKey from "@/i18n/i18nKey";
 import { i18n } from "@/i18n/translation";
-import { formatDateToYYYYMMDD } from "@/utils/date-utils";
+import {
+  formatArticleDate,
+  hasMeaningfulArticleUpdate,
+  type ArticleDateValue,
+} from "@/utils/date-utils";
 import { getCategoryUrl, getTagUrl } from "@/utils/url-utils";
 
 export interface Props {
-	published: Date;
-	updated?: Date;
+	published: ArticleDateValue;
+	updated?: ArticleDateValue;
 	category?: string;
 	tags?: string[];
 	hideUpdateDate?: boolean;
@@ -66,14 +70,14 @@ const path = customPath || (id ? `/posts/${id}` : "");
         class="text-xl"
       />
     </div>
-    <span class="text-50 text-sm font-medium"
-      >{formatDateToYYYYMMDD(published)}</span
-    >
+    <span class="text-50 text-sm font-medium">
+      {i18n(I18nKey.publishedAt)} {formatArticleDate(published)}
+    </span>
   </div>
 
   <!-- update date -->
   {
-    !hideUpdateDate && updated && updated.getTime() !== published.getTime() && (
+    !hideUpdateDate && hasMeaningfulArticleUpdate(published, updated) && updated && (
       <div class="flex items-center">
         <div class="meta-icon">
           <Icon is:inline
@@ -82,7 +86,7 @@ const path = customPath || (id ? `/posts/${id}` : "");
           />
         </div>
         <span class="text-50 text-sm font-medium">
-          {formatDateToYYYYMMDD(updated)}
+          {i18n(I18nKey.updatedAt)} {formatArticleDate(updated)}
         </span>
       </div>
     )

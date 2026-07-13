@@ -1,0 +1,450 @@
+
+:root:not(.dark) {
+	--page-bg: #e9ede7;
+	--glass-bg: rgba(236, 241, 235, 0.76);
+	--glass-bg-strong: rgba(229, 235, 229, 0.86);
+	--glass-bg-soft: rgba(244, 247, 242, 0.48);
+	--glass-border: rgba(76, 101, 87, 0.18);
+	--glass-border-strong: rgba(255, 255, 255, 0.5);
+	--glass-shadow: 0 6px 20px rgba(37, 54, 45, 0.1);
+	--nav-glass-bg: rgba(225, 232, 226, 0.76);
+	--music-glass-bg: rgba(230, 237, 231, 0.8);
+	--card-bg: var(--glass-bg);
+	--card-bg-transparent: var(--glass-bg);
+	--float-panel-bg: var(--glass-bg-strong);
+	--primary: #587463;
+	--btn-content: #405248;
+	--btn-regular-bg: rgba(216, 228, 219, 0.82);
+	--btn-regular-bg-hover: rgba(202, 217, 206, 0.9);
+	--btn-regular-bg-active: rgba(186, 204, 191, 0.94);
+	--btn-plain-bg-hover: rgba(218, 229, 220, 0.7);
+	--btn-plain-bg-active: rgba(202, 217, 206, 0.82);
+	--btn-card-bg-hover: rgba(245, 248, 243, 0.84);
+	--btn-card-bg-active: rgba(223, 232, 223, 0.9);
+	--enter-btn-bg: var(--btn-regular-bg);
+	--enter-btn-bg-hover: var(--btn-regular-bg-hover);
+	--enter-btn-bg-active: var(--btn-regular-bg-active);
+	--deep-text: #2f3933;
+	--title-active: #587463;
+	--content-meta: rgba(47, 57, 51, 0.66);
+	--meta-divider: rgba(76, 101, 87, 0.22);
+	--muted: #dde4dd;
+	--selection-bg: #d8e2d8;
+	--link-underline: rgba(113, 139, 120, 0.3);
+	--link-hover: rgba(205, 219, 207, 0.86);
+	--link-active: rgba(184, 202, 188, 0.9);
+	--line-divider: rgba(76, 101, 87, 0.18);
+	--line-color: rgba(76, 101, 87, 0.22);
+	--toc-badge-bg: rgba(211, 224, 213, 0.78);
+	--toc-btn-hover: rgba(214, 227, 216, 0.86);
+	--toc-btn-active: rgba(196, 214, 199, 0.92);
+	--toc-indicator-bg: rgba(218, 228, 219, 0.76);
+	--toc-item-active: #587463;
+	--floating-glass-bg: rgba(225, 232, 226, 0.58);
+	--floating-glass-bg-strong: rgba(231, 237, 231, 0.72);
+	--floating-glass-border: rgba(76, 101, 87, 0.16);
+	--floating-glass-shadow: 0 10px 24px rgba(37, 54, 45, 0.09);
+	--floating-glass-radius: 1.125rem;
+	--floating-control-hover: rgba(76, 101, 87, 0.1);
+	--floating-control-active: rgba(104, 132, 112, 0.16);
+	--floating-control-muted: rgba(47, 57, 51, 0.58);
+	--floating-control-track: rgba(76, 101, 87, 0.16);
+	--floating-control-progress: #718a78;
+	--floating-control-text: #354238;
+}
+
+:root.dark {
+	--glass-bg: rgba(8, 22, 39, 0.62);
+	--glass-bg-strong: rgba(8, 24, 43, 0.8);
+	--glass-bg-soft: rgba(14, 37, 61, 0.44);
+	--glass-border: rgba(130, 185, 235, 0.2);
+	--glass-border-strong: rgba(156, 206, 250, 0.28);
+	--glass-shadow: 0 8px 24px rgba(0, 8, 18, 0.28);
+	--nav-glass-bg: rgba(8, 22, 39, 0.82);
+	--music-glass-bg: rgba(18, 29, 49, 0.76);
+	--card-bg: var(--glass-bg);
+	--card-bg-transparent: var(--glass-bg);
+	--float-panel-bg: var(--glass-bg-strong);
+	--btn-regular-bg: rgba(18, 45, 72, 0.66);
+	--btn-plain-bg-hover: rgba(65, 122, 174, 0.2);
+	--line-divider: rgba(130, 185, 235, 0.16);
+	--line-color: rgba(130, 185, 235, 0.16);
+	--floating-glass-bg: rgba(42, 44, 52, 0.58);
+	--floating-glass-bg-strong: rgba(37, 40, 47, 0.72);
+	--floating-glass-border: rgba(206, 214, 204, 0.14);
+	--floating-glass-shadow: 0 10px 24px rgba(7, 10, 12, 0.2);
+	--floating-glass-radius: 1.125rem;
+	--floating-control-hover: color-mix(in srgb, var(--primary) 12%, transparent);
+	--floating-control-active: color-mix(in srgb, var(--primary) 22%, transparent);
+	--floating-control-muted: rgba(218, 225, 215, 0.6);
+	--floating-control-track: color-mix(in srgb, var(--primary) 24%, rgba(218, 225, 215, 0.1));
+	--floating-control-progress: var(--primary);
+	--floating-control-text: rgba(238, 242, 235, 0.92);
+}
+
+.card-base,
+.card-base-transparent,
+.btn-card,
+.post-card-item,
+.category-bar,
+.widget,
+.widget-base,
+.calendar,
+.toc-widget,
+.post-list-layout-switch,
+.post-list-container > div,
+.wallpaper-transparent .card-base,
+.wallpaper-transparent .card-base-transparent {
+	background: var(--glass-bg) !important;
+	border-color: var(--glass-border) !important;
+	box-shadow: var(--glass-shadow);
+	backdrop-filter: none !important;
+	-webkit-backdrop-filter: none !important;
+}
+
+.float-panel,
+.dropdown-content,
+#music-nav-panel,
+#display-setting,
+.floating-toc-panel {
+	background: var(--glass-bg-strong) !important;
+	border: 1px solid var(--glass-border-strong) !important;
+	box-shadow: 0 8px 24px rgba(3, 12, 24, 0.2) !important;
+	backdrop-filter: blur(6px) saturate(1.1) !important;
+	-webkit-backdrop-filter: blur(6px) saturate(1.1) !important;
+}
+
+.btn-regular,
+.btn-plain,
+input,
+textarea,
+select,
+.post-list-layout-switch button:not(.active) {
+	backdrop-filter: none !important;
+	-webkit-backdrop-filter: none !important;
+}
+
+.music-player-widget {
+	background: var(--music-glass-bg);
+	border: 1px solid var(--glass-border-strong);
+	box-shadow: 0 8px 24px rgba(3, 12, 24, 0.2);
+	backdrop-filter: blur(6px) saturate(1.1);
+	-webkit-backdrop-filter: blur(6px) saturate(1.1);
+}
+
+.music-player-widget :is(.music-main, .music-loading, .aplayer, .aplayer-list, .aplayer-body) {
+	background: transparent !important;
+}
+
+.music-player-widget button,
+.music-player-widget .btn,
+.music-player-widget .aplayer-icon {
+	background: rgba(8, 22, 39, 0.34);
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+}
+
+:root:not(.dark) .music-player-widget button,
+:root:not(.dark) .music-player-widget .btn,
+:root:not(.dark) .music-player-widget .aplayer-icon {
+	background: rgba(215, 226, 217, 0.72);
+}
+
+:root:not(.dark) body {
+	color: var(--deep-text);
+}
+
+:root:not(.dark) :is(.text-90, .text-75, .btn-plain, .dropdown-item) {
+	color: rgba(47, 57, 51, 0.78);
+}
+
+:root:not(.dark) .text-50 {
+	color: rgba(47, 57, 51, 0.58);
+}
+
+:root:not(.dark) .text-30,
+:root:not(.dark) .text-25 {
+	color: rgba(47, 57, 51, 0.38);
+}
+
+:root:not(.dark) :is(#navbar > div, .float-panel, .dropdown-content, #music-nav-panel, #display-setting, .floating-toc-panel) {
+	box-shadow: 0 8px 24px rgba(37, 54, 45, 0.1) !important;
+}
+
+:root:not(.dark) #wallpaper-wrapper ~ * #navbar[data-transparent-mode] > div,
+:root:not(.dark) body:has(#wallpaper-wrapper) #navbar[data-transparent-mode] > div {
+	background: var(--nav-glass-bg) !important;
+}
+
+:root:not(.dark) #wallpaper-gradient {
+	height: 22vh !important;
+	background: linear-gradient(
+		to bottom,
+		rgba(79, 94, 83, 0) 0%,
+		rgba(91, 105, 94, 0.14) 38%,
+		rgba(202, 211, 202, 0.72) 73%,
+		var(--page-bg) 100%
+	) !important;
+}
+
+.wallpaper-transparent .float-panel,
+.wallpaper-transparent .btn-regular,
+.wallpaper-transparent .post-card-item,
+.wallpaper-transparent .category-bar {
+	background: var(--glass-bg) !important;
+}
+
+/* Right-side floating control system. Keep page cards and control logic independent. */
+#navbar > div {
+	background: var(--floating-glass-bg) !important;
+	border: 1px solid var(--floating-glass-border) !important;
+	border-radius: var(--floating-glass-radius) !important;
+	box-shadow: var(--floating-glass-shadow) !important;
+	backdrop-filter: blur(6px) saturate(1.05) !important;
+	-webkit-backdrop-filter: blur(6px) saturate(1.05) !important;
+}
+
+:root:not(.dark) #wallpaper-wrapper ~ * #navbar[data-transparent-mode="semi"] > div,
+:root:not(.dark) body:has(#wallpaper-wrapper) #navbar[data-transparent-mode="semi"] > div,
+:root:not(.dark) #wallpaper-wrapper ~ * #navbar[data-transparent-mode="semifull"].scrolled > div,
+:root:not(.dark) body:has(#wallpaper-wrapper) #navbar[data-transparent-mode="semifull"].scrolled > div,
+:root.dark #wallpaper-wrapper ~ * #navbar[data-transparent-mode="semi"] > div,
+:root.dark body:has(#wallpaper-wrapper) #navbar[data-transparent-mode="semi"] > div,
+:root.dark #wallpaper-wrapper ~ * #navbar[data-transparent-mode="semifull"].scrolled > div,
+:root.dark body:has(#wallpaper-wrapper) #navbar[data-transparent-mode="semifull"].scrolled > div {
+	background: var(--floating-glass-bg) !important;
+	border-color: var(--floating-glass-border) !important;
+	border-radius: var(--floating-glass-radius) !important;
+	box-shadow: var(--floating-glass-shadow) !important;
+}
+
+:root:not(.dark) #navbar.navbar-sticky-shadow > div,
+:root.dark #navbar.navbar-sticky-shadow > div {
+	box-shadow: var(--floating-glass-shadow) !important;
+}
+
+#navbar #search-bar {
+	background: color-mix(in srgb, var(--floating-glass-bg) 62%, transparent) !important;
+	border: 1px solid transparent;
+	border-radius: var(--floating-glass-radius) !important;
+	box-shadow: none !important;
+	transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+#navbar #search-bar:hover,
+#navbar #search-bar:focus-within {
+	background: var(--floating-control-hover) !important;
+	border-color: var(--floating-glass-border);
+}
+
+#navbar #search-bar input {
+	background: transparent !important;
+	border: 0 !important;
+	box-shadow: none !important;
+}
+
+#navbar :is(#music-player-switch, #bg-player-toggle, #display-settings-switch, #scheme-switch, #search-switch) {
+	background: transparent !important;
+	border: 1px solid transparent !important;
+	border-radius: var(--floating-glass-radius) !important;
+	box-shadow: none !important;
+	outline: none;
+}
+
+#navbar :is(#music-player-switch, #bg-player-toggle, #display-settings-switch, #scheme-switch, #search-switch):hover {
+	background: var(--floating-control-hover) !important;
+	border-color: transparent !important;
+}
+
+#navbar :is(#music-player-switch, #bg-player-toggle, #display-settings-switch, #scheme-switch, #search-switch):active {
+	background: var(--floating-control-active) !important;
+	border-color: var(--floating-glass-border) !important;
+}
+
+#navbar :is(#music-player-switch, #bg-player-toggle, #display-settings-switch, #scheme-switch, #search-switch):focus-visible {
+	outline: 1px solid var(--floating-glass-border);
+	outline-offset: -1px;
+}
+
+#navbar :is(#music-nav-panel, #display-setting, #search-panel) {
+	background: var(--floating-glass-bg-strong) !important;
+	border: 1px solid var(--floating-glass-border) !important;
+	border-radius: var(--floating-glass-radius) !important;
+	box-shadow: var(--floating-glass-shadow) !important;
+	backdrop-filter: blur(6px) saturate(1.04) !important;
+	-webkit-backdrop-filter: blur(6px) saturate(1.04) !important;
+}
+
+#navbar #music-nav-panel {
+	--primary: var(--floating-control-progress);
+	--btn-regular-bg: var(--floating-control-active);
+	--btn-regular-bg-hover: var(--floating-control-hover);
+	--btn-regular-bg-active: var(--floating-control-active);
+	color: var(--floating-control-text);
+}
+
+#navbar #music-nav-panel .music-player-widget {
+	background: transparent !important;
+	border: 0 !important;
+	border-radius: 0 !important;
+	box-shadow: none !important;
+	backdrop-filter: none !important;
+	-webkit-backdrop-filter: none !important;
+}
+
+#navbar #music-nav-panel .music-player-widget :is(.music-title, .btn-prev, .btn-next) {
+	color: var(--floating-control-text) !important;
+}
+
+#navbar #music-nav-panel .music-player-widget :is(.music-artist, .current-time, .total-time, .btn-repeat, .btn-drawer-toggle, .btn-lrc-toggle, .btn-mute) {
+	color: var(--floating-control-muted) !important;
+}
+
+#navbar #music-nav-panel .music-player-widget button:not(.btn-play) {
+	background: transparent !important;
+	border: 1px solid transparent !important;
+	border-radius: calc(var(--floating-glass-radius) - 0.35rem) !important;
+	box-shadow: none !important;
+}
+
+#navbar #music-nav-panel .music-player-widget button:not(.btn-play):hover {
+	background: var(--floating-control-hover) !important;
+	color: var(--floating-control-text) !important;
+}
+
+#navbar #music-nav-panel .music-player-widget .btn-play {
+	background: var(--floating-control-active) !important;
+	border: 1px solid var(--floating-glass-border) !important;
+	box-shadow: none !important;
+	color: var(--floating-control-progress) !important;
+}
+
+#navbar #music-nav-panel .music-player-widget .btn-play:hover {
+	background: var(--floating-control-hover) !important;
+}
+
+#navbar #music-nav-panel .music-player-widget :is(.vol-container, .progress-container) {
+	background: var(--floating-control-track) !important;
+}
+
+#navbar #music-nav-panel .music-player-widget :is(.vol-bar, .progress-bar, .progress-thumb) {
+	background: var(--floating-control-progress) !important;
+}
+
+#navbar #music-nav-panel .music-player-widget .progress-thumb {
+	--tw-ring-color: var(--floating-glass-bg-strong) !important;
+	box-shadow: none !important;
+}
+
+#navbar #music-nav-panel .music-player-widget .music-cover {
+	border-color: var(--floating-glass-border) !important;
+}
+
+#navbar #display-setting {
+	--primary: var(--floating-control-progress);
+	--btn-regular-bg: color-mix(in srgb, var(--floating-glass-bg) 74%, transparent);
+	--btn-regular-bg-hover: var(--floating-control-hover);
+	--btn-regular-bg-active: var(--floating-control-active);
+	--btn-content: var(--floating-control-text);
+	color: var(--floating-control-text);
+}
+
+#navbar #display-setting .btn-regular,
+#navbar #display-setting #hueValue {
+	border: 1px solid transparent;
+	border-radius: calc(var(--floating-glass-radius) - 0.45rem) !important;
+	box-shadow: none !important;
+}
+
+#navbar #display-setting .btn-regular:hover {
+	border-color: var(--floating-glass-border);
+}
+
+#navbar #display-setting input[type="range"] {
+	background-image: linear-gradient(90deg, var(--floating-control-progress) 0 var(--range-progress, 50%), var(--floating-control-track) var(--range-progress, 50%) 100%) !important;
+}
+
+#navbar #display-setting #colorSlider {
+	background-image: var(--color-selection-bar) !important;
+}
+
+#navbar #display-setting button.btn-regular > div.w-10.h-5 {
+	background: var(--floating-control-track) !important;
+}
+
+#navbar #display-setting button.btn-regular > div.w-10.h-5:has(.left-5) {
+	background: var(--floating-control-progress) !important;
+}
+
+#navbar #display-setting button.btn-regular > div.w-10.h-5 > div {
+	background: color-mix(in srgb, var(--floating-glass-bg-strong) 88%, white) !important;
+	box-shadow: none !important;
+}
+
+/* Sidebar music stays inside its card instead of becoming a second panel. */
+widget-layout:has(.music-player-widget) .music-player-widget {
+	--primary: var(--floating-control-progress);
+	--btn-regular-bg: var(--floating-control-active);
+	--btn-regular-bg-hover: var(--floating-control-hover);
+	--btn-regular-bg-active: var(--floating-control-active);
+	background: transparent;
+	border: 0;
+	border-radius: 0;
+	box-shadow: none;
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+	color: var(--floating-control-text);
+}
+
+widget-layout:has(.music-player-widget) .music-player-widget :is(.music-title, .btn-prev, .btn-next) {
+	color: var(--floating-control-text);
+}
+
+widget-layout:has(.music-player-widget) .music-player-widget :is(.music-artist, .current-time, .total-time, .btn-repeat, .btn-drawer-toggle, .btn-lrc-toggle, .btn-mute) {
+	color: var(--floating-control-muted);
+}
+
+widget-layout:has(.music-player-widget) .music-player-widget button:not(.btn-play) {
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: calc(var(--floating-glass-radius) - 0.35rem);
+	box-shadow: none;
+}
+
+widget-layout:has(.music-player-widget) .music-player-widget button:not(.btn-play):hover {
+	background: var(--floating-control-hover);
+	color: var(--floating-control-text);
+}
+
+widget-layout:has(.music-player-widget) .music-player-widget .btn-play {
+	background: var(--floating-control-active);
+	border: 1px solid var(--floating-glass-border);
+	box-shadow: none;
+	color: var(--floating-control-progress);
+}
+
+widget-layout:has(.music-player-widget) .music-player-widget .btn-play:hover {
+	background: var(--floating-control-hover);
+}
+
+widget-layout:has(.music-player-widget) .music-player-widget :is(.vol-container, .progress-container) {
+	background: var(--floating-control-track);
+}
+
+widget-layout:has(.music-player-widget) .music-player-widget :is(.vol-bar, .progress-bar, .progress-thumb) {
+	background: var(--floating-control-progress);
+}
+
+widget-layout:has(.music-player-widget) .music-player-widget .progress-thumb {
+	--tw-ring-color: var(--card-bg);
+	box-shadow: none;
+}
+
+widget-layout:has(.music-player-widget) .music-player-widget > div:first-child > div:first-child > div {
+	border-color: var(--floating-glass-border);
+	box-shadow: none;
+}
+
+widget-layout:has(.music-player-widget) .music-player-widget .music-loading {
+	background: color-mix(in srgb, var(--card-bg) 78%, transparent);
+}

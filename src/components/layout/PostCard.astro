@@ -9,14 +9,15 @@ import I18nKey from "@/i18n/i18nKey";
 import { i18n } from "@/i18n/translation";
 import { getApiUrlList, processCoverImageSync } from "@/utils/image-utils";
 import { getFileDirFromPath, getTagUrl } from "@/utils/url-utils";
+import type { ArticleDateValue } from "@/utils/date-utils";
 
 interface Props {
 	class?: string;
 	entry: CollectionEntry<"posts">;
 	title: string;
 	url: string;
-	published: Date;
-	updated?: Date;
+	published: ArticleDateValue;
+	updated?: ArticleDateValue;
 	tags: string[];
 	category: string | null;
 	image: string;

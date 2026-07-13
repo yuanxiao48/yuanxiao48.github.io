@@ -52,10 +52,11 @@ const adapter = process.env.CF_WORKERS
 
 // https://astro.build/config
 export default defineConfig({
-	site: siteConfig.site_url,
+	site: "https://yuanxiao48.github.io",
 
 	base: "/",
 	trailingSlash: "always",
+	cacheDir: ".astro",
 
 	adapter,
 
@@ -270,11 +271,13 @@ export default defineConfig({
 			},
 		},
 		resolve: {
+			preserveSymlinks: true,
 			alias: {
 				"@rehype-callouts-theme": `rehype-callouts/theme/${siteConfig.post.rehypeCallouts.theme}`,
 			},
 		},
 		build: {
+			emptyOutDir: true,
 			minify: "esbuild",
 			esbuildOptions: {
 				minify: true,
@@ -302,4 +305,3 @@ export default defineConfig({
 		},
 	},
 });
-

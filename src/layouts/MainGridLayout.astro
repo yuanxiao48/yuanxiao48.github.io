@@ -26,7 +26,11 @@ import {
 } from "@/constants/constants";
 import I18nKey from "@/i18n/i18nKey";
 import { i18n } from "@/i18n/translation";
-import { formatDateToYYYYMMDD } from "@/utils/date-utils";
+import {
+	formatArticleDate,
+	hasMeaningfulArticleUpdate,
+	type ArticleDateValue,
+} from "@/utils/date-utils";
 import { getImageQuality } from "@/utils/image-utils";
 import { getBackgroundImages, isHomePage } from "@/utils/layout-utils";
 import {
@@ -53,8 +57,8 @@ interface Props {
 	headings?: MarkdownHeading[];
 	bannerPostMeta?: {
 		title: string;
-		published: Date;
-		updated?: Date;
+		published: ArticleDateValue;
+		updated?: ArticleDateValue;
 		words?: number;
 		minutes?: number;
 	};
@@ -743,13 +747,13 @@ const bannerCarouselInterval = Math.max(
                     <div class="banner-post-meta-list flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-white/90 text-sm md:text-base">
                         <span class="inline-flex items-center gap-1.5">
                             <Icon is:inline name="material-symbols:calendar-month-outline-rounded" class="text-[1.05em]" />
-                            <span>{i18n(I18nKey.publishedAt)} {formatDateToYYYYMMDD(bannerPostMeta.published)}</span>
+                            <span>{i18n(I18nKey.publishedAt)} {formatArticleDate(bannerPostMeta.published)}</span>
                         </span>
-                        {bannerPostMeta.updated &&
-                            bannerPostMeta.updated.getTime() !== bannerPostMeta.published.getTime() && (
+                        {hasMeaningfulArticleUpdate(bannerPostMeta.published, bannerPostMeta.updated) &&
+                            bannerPostMeta.updated && (
                                 <span class="inline-flex items-center gap-1.5">
                                     <Icon is:inline name="material-symbols:update-rounded" class="text-[1.05em]" />
-                                    <span>{i18n(I18nKey.updatedAt)} {formatDateToYYYYMMDD(bannerPostMeta.updated)}</span>
+                                    <span>{i18n(I18nKey.updatedAt)} {formatArticleDate(bannerPostMeta.updated)}</span>
                                 </span>
                             )}
                         {typeof bannerPostMeta.words === "number" && (
@@ -969,4 +973,3 @@ const bannerCarouselInterval = Math.max(
   }
 
 </style>
-

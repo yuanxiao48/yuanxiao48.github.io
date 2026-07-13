@@ -268,12 +268,10 @@ function loadButtonScript() {
     }
 
     let themeSwitchBtn = document.getElementById("scheme-switch");
-    if (themeSwitchBtn) {
+    let themePanel = document.getElementById("theme-mode-panel");
+    if (themeSwitchBtn && themePanel) {
         themeSwitchBtn.onclick = function () {
-            let themePanel = document.getElementById("theme-mode-panel");
-            if (themePanel) {
-                themePanel.classList.toggle("float-panel-closed");
-            }
+            themePanel.classList.toggle("float-panel-closed");
         };
     }
 

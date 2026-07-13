@@ -5,7 +5,7 @@ import rss, { type RSSFeedItem } from "@astrojs/rss";
 import I18nKey from "@i18n/i18nKey";
 import { i18n } from "@i18n/translation";
 import { getSortedPosts } from "@utils/content-utils";
-import { formatDateI18nWithTime } from "@utils/date-utils";
+import { formatDateI18nWithTime, toArticleDate } from "@utils/date-utils";
 import { url } from "@utils/url-utils";
 import type { APIContext } from "astro";
 import { experimental_AstroContainer as AstroContainer } from "astro/container";
@@ -30,7 +30,7 @@ export async function GET(context: APIContext) {
 		if (post.data.password) {
 			feedItems.push({
 				title: post.data.title,
-				pubDate: post.data.published,
+				pubDate: toArticleDate(post.data.published),
 				description: post.data.description || "",
 				link: url(`/posts/${post.id}/`),
 				content: i18n(I18nKey.passwordProtectedRss),
@@ -42,7 +42,7 @@ export async function GET(context: APIContext) {
 		const cleanedContent = stripInvalidXmlChars(rawContent);
 		feedItems.push({
 			title: post.data.title,
-			pubDate: post.data.published,
+			pubDate: toArticleDate(post.data.published),
 			description: post.data.description || "",
 			link: url(`/posts/${post.id}/`),
 			content: sanitizeHtml(cleanedContent, {

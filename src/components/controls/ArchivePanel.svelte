@@ -4,6 +4,11 @@ import { onMount } from "svelte";
 import { siteConfig } from "@/config";
 import I18nKey from "@/i18n/i18nKey";
 import { i18n } from "@/i18n/translation";
+import {
+	compareArticles,
+	formatArticleDate,
+	type ArticleDateValue,
+} from "@/utils/date-utils";
 import { getPostUrlBySlug } from "@/utils/url-utils";
 
 export let tags: string[] = [];
@@ -21,7 +26,9 @@ interface Post {
 		title: string;
 		tags: string[];
 		category?: string | null;
-		published: Date;
+		published: ArticleDateValue;
+		updated?: ArticleDateValue;
+		pinned?: boolean;
 	};
 }
 
@@ -68,10 +75,8 @@ function toggleYear(year: number) {
 	});
 }
 
-function formatDate(date: Date) {
-	const month = (date.getMonth() + 1).toString().padStart(2, "0");
-	const day = date.getDate().toString().padStart(2, "0");
-	return `${month}-${day}`;
+function formatDate(date: ArticleDateValue) {
+	return formatArticleDate(date);
 }
 
 function formatTag(tagList: string[]) {
@@ -141,15 +146,13 @@ onMount(async () => {
 	}
 
 	// 按发布时间倒序排序，确保不受置顶影响
-	filteredPosts = filteredPosts
-		.slice()
-		.sort((a, b) => b.data.published.getTime() - a.data.published.getTime());
+	filteredPosts = filteredPosts.slice().sort(compareArticles);
 
 	filteredPostCount = filteredPosts.length;
 
 	const grouped = filteredPosts.reduce(
 		(acc, post) => {
-			const year = post.data.published.getFullYear();
+			const year = Number.parseInt(formatArticleDate(post.data.published).slice(0, 4), 10);
 			if (!acc[year]) {
 				acc[year] = [];
 			}

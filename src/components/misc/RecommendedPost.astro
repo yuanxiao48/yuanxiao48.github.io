@@ -3,7 +3,7 @@ import { Icon } from "astro-icon/components";
 import I18nKey from "@/i18n/i18nKey";
 import { i18n } from "@/i18n/translation";
 import type { PostForList } from "@/utils/content-utils";
-import { formatDateToYYYYMMDD } from "@/utils/date-utils";
+import { formatArticleDate } from "@/utils/date-utils";
 import { getPostUrlBySlug, url } from "@/utils/url-utils";
 
 interface Props {
@@ -56,7 +56,7 @@ const noRandomPostsText = i18n(I18nKey.noRandomPosts);
                   {post.data.category}
                 </span>
               )}
-              <span class="truncate">{post.data.description || formatDateToYYYYMMDD(post.data.published)}</span>
+              <span class="truncate">{post.data.description || formatArticleDate(post.data.published)}</span>
             </div>
           </div>
           <Icon is:inline

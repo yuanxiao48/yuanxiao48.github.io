@@ -1,7 +1,7 @@
 ---
 import MainGridLayout from "@layouts/MainGridLayout.astro";
 import { getSortedPosts } from "@utils/content-utils";
-import { formatDateToYYYYMMDD } from "@utils/date-utils";
+import { formatArticleDate, toArticleDate } from "@utils/date-utils";
 import { Icon } from "astro-icon/components";
 import I18nKey from "@/i18n/i18nKey";
 import { i18n } from "@/i18n/translation";
@@ -74,8 +74,8 @@ const recentPosts = posts.slice(0, 6);
                             </p>
                         )}
                         <div class="flex items-center gap-4 text-sm text-60">
-                            <time datetime={post.data.published.toISOString()} class="text-75">
-                                {formatDateToYYYYMMDD(post.data.published)}
+                            <time datetime={toArticleDate(post.data.published).toISOString()} class="text-75">
+                                {formatArticleDate(post.data.published)}
                             </time>
                         </div>
                     </article>

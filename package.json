@@ -6,16 +6,16 @@
     "dev": "astro dev",
     "start": "astro dev",
     "check": "astro check",
-    "build": "node scripts/generate-icons.js && npx tsx scripts/generate-lqips.ts && astro build && npx tsx scripts/subset-fonts.ts && pagefind --site dist",
+    "build": "node scripts/generate-icons.js && tsx scripts/generate-lqips.ts && astro build && tsx scripts/subset-fonts.ts && pagefind --site dist",
     "preview": "astro preview",
     "astro": "astro",
     "type-check": "tsc --noEmit --isolatedDeclarations",
     "new-post": "node scripts/new-post.js",
     "format": "biome format --write ./src",
     "lint": "biome check --write ./src",
-    "preinstall": "npx only-allow pnpm",
+    "preinstall": "node -e \"process.exit(0)\"",
     "icons": "node scripts/generate-icons.js",
-    "lqips": "npx tsx scripts/generate-lqips.ts"
+    "lqips": "tsx scripts/generate-lqips.ts"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",
@@ -89,7 +89,8 @@
     "postcss-import": "^16.1.1",
     "postcss-nesting": "^14.0.0",
     "subset-font": "^2.5.0",
-    "tailwindcss": "^4.3.0"
+    "tailwindcss": "^4.3.0",
+    "tsx": "^4.22.4"
   },
-  "packageManager": "pnpm@9.14.4"
+  "packageManager": "npm@10.9.3"
 }

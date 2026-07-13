@@ -735,7 +735,7 @@ html[data-wallpaper-mode="fullscreen"] body:not(.sticky-navbar) #top-row {
 
 #wallpaper-wrapper.wallpaper-fullscreen .scroll-down-indicator .scroll-down-icon {
     font-size: 5rem;
-    animation: scroll-down-bounce 2s ease-in-out infinite;
+    animation: scroll-down-bounce 4s ease-in-out infinite;
     filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.3));
 }
 
@@ -746,7 +746,7 @@ html[data-wallpaper-mode="fullscreen"] body:not(.sticky-navbar) #top-row {
 
 @keyframes scroll-down-bounce {
     0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(8px); }
+    50% { transform: translateY(4px); }
 }
 
 /* 点击滚动指示器跳转到文章列表时，避免被固定导航栏遮挡 */

@@ -249,30 +249,7 @@ body:has(#wallpaper-wrapper) #navbar[data-transparent-mode="semifull"][data-enab
 
 
 
-/* 调整下拉菜单和浮动面板的背景透明度 */
-/* 亮色主题 */
-#wallpaper-wrapper~* .dropdown-content,
-#wallpaper-wrapper~* .float-panel,
-body:has(#wallpaper-wrapper) .dropdown-content,
-body:has(#wallpaper-wrapper) .float-panel,
-body.wallpaper-transparent .dropdown-content,
-body.wallpaper-transparent .float-panel {
-    background: rgba(255, 255, 255, 0.95) !important;
-    box-shadow: var(--shadow-md) !important;
-    border: 1px solid rgba(0, 0, 0, 0.05) !important;
-}
-
-/* 暗色主题 */
-:root.dark #wallpaper-wrapper~* .dropdown-content,
-:root.dark #wallpaper-wrapper~* .float-panel,
-:root.dark body:has(#wallpaper-wrapper) .dropdown-content,
-:root.dark body:has(#wallpaper-wrapper) .float-panel,
-:root.dark body.wallpaper-transparent .dropdown-content,
-:root.dark body.wallpaper-transparent .float-panel {
-    background: rgba(23, 23, 23, 0.95) !important;
-    box-shadow: var(--shadow-md) !important;
-    border: 1px solid rgba(255, 255, 255, 0.1) !important;
-}
+/* Floating control surfaces are defined in glass-theme.css. */
 
 /* ============================================
  * 全宽导航栏适配 (Full Width Navbar)

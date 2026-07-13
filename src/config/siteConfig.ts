@@ -1,4 +1,25 @@
 import type { SiteConfig } from "@/types/siteConfig";
+import userSettings from "./userSettings.json";
+
+const settings = userSettings as {
+	site: {
+		title: string;
+		subtitle: string;
+		url: string;
+		description: string;
+	};
+	theme: {
+		hue: number;
+		defaultMode: SiteConfig["themeColor"]["defaultMode"];
+	};
+	pages: {
+		friends: boolean;
+		sponsor: boolean;
+		guestbook: boolean;
+		bangumi: boolean;
+		gallery: boolean;
+	};
+};
 
 // 定义站点语言
 // 语言代码，例如：'zh_CN', 'zh_TW', 'en', 'ja', 'ru'。
@@ -6,43 +27,40 @@ const SITE_LANG = "zh_CN";
 
 export const siteConfig: SiteConfig = {
 	// 站点标题
-	title: "Firefly",
+	title: settings.site.title,
 
 	// 站点副标题
-	subtitle: "Demo site",
+	subtitle: settings.site.subtitle,
 
 	// 站点 URL
-	site_url: "https://firefly.cuteleaf.cn",
+	site_url: settings.site.url,
 
 	// 站点描述
-	description:
-		"Firefly 是一款基于 Astro 框架和 Fuwari 模板开发的清新美观且现代化个人博客主题模板，专为技术爱好者和内容创作者设计。该主题融合了现代 Web 技术栈，提供了丰富的功能模块和高度可定制的界面，让您能够轻松打造出专业且美观的个人博客网站。",
+	description: settings.site.description,
 
 	// 站点关键词
 	keywords: [
-		"Firefly",
-		"Fuwari",
+		"个人博客",
 		"Astro",
-		"ACGN",
 		"博客",
-		"技术博客",
-		"静态博客",
+		"日常",
+		"笔记",
 	],
 
 	// 主题色
 	themeColor: {
 		// 主题色的默认色相，范围从 0 到 360。例如：红色：0，青色：200，蓝绿色：250，粉色：345
-		hue: 165,
+		hue: settings.theme.hue,
 		// 是否对访问者隐藏主题色选择器
 		fixed: false,
 		// 默认模式："light" 亮色，"dark" 暗色，"system" 跟随系统
-		defaultMode: "system",
+		defaultMode: settings.theme.defaultMode,
 	},
 
 	// 页面整体宽度（单位：rem）
 	// 数值越大可以让页面内容区域更宽
 	// 在使用单侧栏边栏时，建议调低一些宽度以获得更好的视觉效果。
-	pageWidth: 100,
+	pageWidth: 91,
 
 	// 网站Card样式配置
 	card: {
@@ -73,12 +91,12 @@ export const siteConfig: SiteConfig = {
 		// 3. 本地图片（src目录，自动优化但会增加构建时间）: { type: "image", value: "assets/images/logo.webp", alt: "Logo" }
 		// 4. 网络图片: { type: "url", value: "https://example.com/logo.png", alt: "Logo" }
 		logo: {
-			type: "image",
-			value: "assets/images/firefly.png",
-			alt: "🍀",
+			type: "icon",
+			value: "material-symbols:edit-note",
+			alt: "Blog",
 		},
 		// 导航栏标题
-		title: "Firefly",
+		title: settings.site.title,
 		// 全宽导航栏，导航栏是否占满屏幕宽度
 		widthFull: false,
 		// 导航菜单对齐方式，left：左对齐，center：居中
@@ -90,7 +108,7 @@ export const siteConfig: SiteConfig = {
 	},
 
 	// 站点开始日期，用于统计运行天数
-	siteStartDate: "2025-01-01",
+	siteStartDate: "2026-07-10",
 
 	// 站点时区（IANA 时区字符串），用于格式化bangumi、rss里的构建日期时间等等..
 	// 示例："Asia/Shanghai", "UTC", 如果为空，则按照构建服务器的时区进行时区转换
@@ -99,15 +117,15 @@ export const siteConfig: SiteConfig = {
 	// 页面开关配置 - 控制特定页面的访问权限，设为false会返回404并自动隐藏对应的导航栏菜单项
 	pages: {
 		// 友链页面开关
-		friends: true,
+		friends: settings.pages.friends,
 		// 打赏页面开关
-		sponsor: true,
+		sponsor: settings.pages.sponsor,
 		// 留言板页面开关，需要配置评论系统
-		guestbook: true,
+		guestbook: settings.pages.guestbook,
 		// 番组计划页面开关，含追番、游戏、书籍和音乐
-		bangumi: true,
+		bangumi: settings.pages.bangumi,
 		// 相册页面开关
-		gallery: true,
+		gallery: settings.pages.gallery,
 	},
 
 	// 分类导航栏开关，在首页和归档页顶部显示分类快捷导航

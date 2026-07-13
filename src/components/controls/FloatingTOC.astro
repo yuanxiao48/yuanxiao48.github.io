@@ -34,7 +34,7 @@ const sidebarPosition = sidebarLayoutConfig.position;
   <!-- 悬浮TOC面板 - 移到 Wrapper 内部以便相对定位 -->
   <div
     id="floating-toc-panel"
-    class="floating-toc-panel hide w-80 max-h-96 overflow-hidden rounded-2xl shadow-2xl backdrop-blur-lg border border-white/20 dark:border-white/10 md:w-80 w-[calc(100vw-2rem)] md:max-h-96 max-h-[calc(100vh-8rem)]"
+    class="floating-toc-panel hide w-80 max-h-96 overflow-hidden rounded-2xl shadow-md border border-white/20 dark:border-white/10 md:w-80 w-[calc(100vw-2rem)] md:max-h-96 max-h-[calc(100vh-8rem)]"
     style="background-color: var(--card-bg-transparent);"
     >
     <div
@@ -85,8 +85,8 @@ const sidebarPosition = sidebarLayoutConfig.position;
 	pointer-events: none
 	overflow: hidden
 	box-sizing: border-box
-	backdrop-filter: blur(20px)
-	-webkit-backdrop-filter: blur(20px)
+	backdrop-filter: blur(6px)
+	-webkit-backdrop-filter: blur(6px)
 	z-index: 1001
 	
 	&.show
@@ -127,8 +127,8 @@ const sidebarPosition = sidebarLayoutConfig.position;
 
 /* 暗色主题半透明效果 */
 :global(.dark) .floating-toc-panel
-	backdrop-filter: blur(20px)
-	-webkit-backdrop-filter: blur(20px)
+	backdrop-filter: blur(6px)
+	-webkit-backdrop-filter: blur(6px)
 </style>
 
 <script>

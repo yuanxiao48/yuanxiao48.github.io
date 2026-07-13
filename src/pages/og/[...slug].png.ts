@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import type { APIContext, GetStaticPaths } from "astro";
 import satori from "satori";
 import { removeFileExtension } from "@/utils/url-utils";
+import { toArticleDate } from "@/utils/date-utils";
 
 import { profileConfig } from "../../config/profileConfig";
 import { siteConfig } from "../../config/siteConfig";
@@ -132,7 +133,7 @@ export async function GET({
 	const subtleTextColor = `hsl(${hue}, 10%, 75%)`;
 	const backgroundColor = `hsl(${hue}, 15%, 12%)`;
 
-	const pubDate = post.data.published.toLocaleDateString("en-US", {
+	const pubDate = toArticleDate(post.data.published).toLocaleDateString("en-US", {
 		year: "numeric",
 		month: "short",
 		day: "numeric",
