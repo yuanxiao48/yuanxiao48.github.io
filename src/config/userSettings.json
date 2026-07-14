@@ -40,12 +40,13 @@
       "assets/images/StudioWallpaper/desktop/my-haed-1782131809555.jpg"
     ],
     "wallpaperMobile": [
-      "assets/images/MobileWallpaper/m1.avif",
-      "assets/images/MobileWallpaper/m2.avif",
-      "assets/images/MobileWallpaper/m3.avif",
-      "assets/images/MobileWallpaper/m4.avif",
-      "assets/images/MobileWallpaper/m5.avif",
-      "assets/images/MobileWallpaper/m6.avif"
+      "assets/images/StudioWallpaper/desktop/my-haed-1782131759936.jpg",
+      "assets/images/StudioWallpaper/desktop/my-haed-1782131786298.jpg",
+      "assets/images/StudioWallpaper/desktop/my-haed-1782131793356.jpg",
+      "assets/images/StudioWallpaper/desktop/my-haed-1782131797952.jpg",
+      "assets/images/StudioWallpaper/desktop/my-haed-1782131801518.jpg",
+      "assets/images/StudioWallpaper/desktop/my-haed-1782131805717.jpg",
+      "assets/images/StudioWallpaper/desktop/my-haed-1782131809555.jpg"
     ],
     "bannerPosition": "0% 20%",
     "fullscreenPosition": "center",
@@ -112,11 +113,6 @@
         "position": "sticky"
       },
       {
-        "type": "emailSubscribe",
-        "enable": true,
-        "position": "sticky"
-      },
-      {
         "type": "stats",
         "enable": true,
         "position": "top"
@@ -144,10 +140,6 @@
       },
       {
         "type": "music",
-        "enable": true
-      },
-      {
-        "type": "emailSubscribe",
         "enable": true
       },
       {
