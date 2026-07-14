@@ -1,8 +1,8 @@
 ---
 title: "朝夕花拾：聊聊我的静电容键盘"
 published: "2026-07-14T08:27:00+08:00"
-updated: "2026-07-14T08:27:00+08:00"
-draft: true
+updated: "2026-07-14T08:32:00+08:00"
+draft: false
 category: "朝夕花拾"
 tags: ["聊聊"]
 description: "今天跟大家浅聊一下我对键盘的看法"
