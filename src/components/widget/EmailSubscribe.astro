@@ -1,0 +1,160 @@
+---
+import WidgetLayout from "@/components/common/WidgetLayout.astro";
+import type { WidgetComponentConfig } from "@/types/config";
+
+interface Props {
+	class?: string;
+	style?: string;
+	widgetConfig?: WidgetComponentConfig;
+}
+
+const { class: className, style, widgetConfig } = Astro.props;
+const widgetId = `email-subscribe-${Math.random().toString(36).slice(2, 9)}`;
+const showTitle = widgetConfig?.showTitle !== false;
+const subscribeAction =
+	"https://api.follow.it/subscription-form/OStORWVUMXZaU3JuMTBuVDdzYkZ3TmYzNGZCR045aEF1T3pUcUUySi9Wd2lwdGgxSkZFRzJpSVZjb1lQSUVkbHZFdW1CWU5CUnVRQ1pPNkJqT1BsUzRtVmYvb3R6LzE0NXJTd0pDcUlteklZd3FNREZ1S3RjUU1xc3M0dWwzdlR8Mzhnb0xab3BQK1QxZnJCdUIxMXR4QnluazFscTFpc21ZcVpTZGwrZEZRQT0=/8";
+---
+
+<WidgetLayout
+	id={`${widgetId}-layout`}
+	class={className}
+	style={style}
+	name="订阅元枭的来信"
+	showTitle={showTitle}
+>
+	<div class="email-subscribe-widget">
+		<p class="email-subscribe-description">新文章发布后，直接送到你的邮箱。</p>
+		<form
+			class="email-subscribe-form"
+			action={subscribeAction}
+			method="post"
+			target="_blank"
+		>
+			<label for={widgetId}>邮箱地址</label>
+			<div class="email-subscribe-controls">
+				<input
+					id={widgetId}
+					type="email"
+					name="email"
+					autocomplete="email"
+					required
+					placeholder="你的邮箱地址"
+				/>
+				<button type="submit">订阅</button>
+			</div>
+		</form>
+		<p class="email-subscribe-note">提交后需要前往邮箱确认订阅。</p>
+		<p class="email-subscribe-status" aria-live="polite" hidden></p>
+	</div>
+</WidgetLayout>
+
+<style>
+	.email-subscribe-widget {
+		display: grid;
+		gap: 0.7rem;
+	}
+
+	.email-subscribe-description {
+		color: var(--content-meta);
+		font-size: 0.875rem;
+		line-height: 1.55;
+	}
+
+	.email-subscribe-form {
+		display: grid;
+		gap: 0.38rem;
+	}
+
+	.email-subscribe-form label {
+		color: var(--floating-control-muted, var(--content-meta));
+		font-size: 0.78rem;
+		font-weight: 650;
+	}
+
+	.email-subscribe-controls {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 0.5rem;
+	}
+
+	.email-subscribe-controls input {
+		min-width: 0;
+		min-height: 2.45rem;
+		padding: 0.55rem 0.7rem;
+		border: 1px solid var(--glass-border);
+		border-radius: 0.7rem;
+		background: color-mix(in srgb, var(--glass-bg-soft) 82%, transparent);
+		color: var(--deep-text);
+		outline: none;
+		transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+	}
+
+	.email-subscribe-controls input::placeholder {
+		color: var(--content-meta);
+		opacity: 0.8;
+	}
+
+	.email-subscribe-controls input:hover {
+		border-color: color-mix(in srgb, var(--primary) 34%, var(--glass-border));
+	}
+
+	.email-subscribe-controls input:focus-visible {
+		border-color: var(--primary);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+	}
+
+	.email-subscribe-controls button {
+		min-height: 2.45rem;
+		padding: 0.55rem 0.85rem;
+		border: 1px solid color-mix(in srgb, var(--primary) 34%, transparent);
+		border-radius: 0.7rem;
+		background: color-mix(in srgb, var(--primary) 14%, var(--btn-regular-bg));
+		color: var(--btn-content);
+		font-weight: 700;
+		cursor: pointer;
+		transition: background-color 160ms ease, border-color 160ms ease, transform 160ms ease;
+	}
+
+	.email-subscribe-controls button:hover {
+		background: color-mix(in srgb, var(--primary) 22%, var(--btn-regular-bg-hover));
+		border-color: color-mix(in srgb, var(--primary) 48%, transparent);
+	}
+
+	.email-subscribe-controls button:focus-visible {
+		outline: 2px solid var(--primary);
+		outline-offset: 2px;
+	}
+
+	.email-subscribe-controls button:active {
+		transform: translateY(1px);
+	}
+
+	.email-subscribe-note,
+	.email-subscribe-status {
+		color: var(--content-meta);
+		font-size: 0.75rem;
+		line-height: 1.5;
+	}
+
+	.email-subscribe-status {
+		color: var(--primary);
+		font-weight: 650;
+	}
+
+	@media (max-width: 22rem) {
+		.email-subscribe-controls {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>
+
+<script>
+	document.querySelectorAll<HTMLFormElement>(".email-subscribe-form").forEach((form) => {
+		form.addEventListener("submit", () => {
+			const status = form.parentElement?.querySelector<HTMLElement>(".email-subscribe-status");
+			if (!status) return;
+			status.hidden = false;
+			status.textContent = "已在新标签打开确认页面。";
+		});
+	});
+</script>

@@ -112,6 +112,11 @@
         "position": "sticky"
       },
       {
+        "type": "emailSubscribe",
+        "enable": true,
+        "position": "sticky"
+      },
+      {
         "type": "stats",
         "enable": true,
         "position": "top"
@@ -139,6 +144,10 @@
       },
       {
         "type": "music",
+        "enable": true
+      },
+      {
+        "type": "emailSubscribe",
         "enable": true
       },
       {
