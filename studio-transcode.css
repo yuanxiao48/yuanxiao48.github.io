@@ -1,0 +1,29 @@
+.studio-transcode-panel { display: grid; gap: 14px; }
+.studio-transcode-grid { display: grid; grid-template-columns: repeat(3, minmax(150px, 1fr)); gap: 9px; }
+.studio-transcode-card, .studio-transcode-section, .studio-transcode-result { border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 88%, transparent); padding: 11px; }
+.studio-transcode-card { display: grid; gap: 4px; min-height: 74px; }
+.studio-transcode-card span, .studio-transcode-section > p, .studio-transcode-result p { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.studio-transcode-card strong { color: var(--text); font-size: 14px; overflow-wrap: anywhere; }
+.studio-transcode-section { display: grid; gap: 10px; }
+.studio-transcode-section h3, .studio-transcode-result h3 { margin: 0; color: var(--text); font-size: 15px; }
+.studio-transcode-paths { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.studio-transcode-paths label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+.studio-transcode-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.studio-transcode-select { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; }
+.studio-transcode-upload { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.studio-transcode-upload input { min-width: 0; max-width: 100%; }
+.studio-transcode-section-heading { display: flex; align-items: start; justify-content: space-between; gap: 10px; }
+.studio-transcode-section-heading > div { display: grid; gap: 4px; }
+.studio-transcode-job-list { display: grid; gap: 8px; max-height: 330px; overflow: auto; }
+.studio-transcode-job { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 9px; background: color-mix(in srgb, var(--panel) 82%, transparent); }
+.studio-transcode-job strong, .studio-transcode-job code { min-width: 0; overflow-wrap: anywhere; }
+.studio-transcode-job p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.studio-transcode-job-actions { display: flex; align-items: start; gap: 6px; }
+.studio-transcode-job[data-state="ready"] { border-color: color-mix(in srgb, var(--accent) 44%, var(--line)); }
+.studio-transcode-job[data-state="failed"], .studio-transcode-job[data-state="interrupted"] { border-color: color-mix(in srgb, var(--danger) 46%, var(--line)); }
+.studio-transcode-result dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 10px; margin: 10px 0 0; font-size: 12px; }
+.studio-transcode-result dt { color: var(--muted); }
+.studio-transcode-result dd { min-width: 0; margin: 0; color: var(--text); overflow-wrap: anywhere; }
+#transcodeStatus[data-state="error"] { color: var(--danger); }
+#transcodeStatus[data-state="ready"] { color: var(--accent); }
+@media (max-width: 900px) { .studio-transcode-grid, .studio-transcode-paths, .studio-transcode-select { grid-template-columns: 1fr; } .studio-transcode-section-heading, .studio-transcode-job { grid-template-columns: 1fr; } }

@@ -2,6 +2,7 @@ import { createLayoutManager } from "./studio-layout-manager.js";
 import { createMediaManager } from "./studio-media-manager.js";
 import { createPageManager } from "./studio-page-manager.js";
 import { createSettingsManager } from "./studio-settings-manager.js";
+import { createTranscodeManager } from "./studio-transcode-manager.js";
 
 const navItems = [...document.querySelectorAll("[data-studio-module]")];
 const panels = [...document.querySelectorAll("[data-studio-module-panel]")];
@@ -10,8 +11,10 @@ const postsPanel = document.querySelector('[data-panel="posts"]');
 const postsMount = document.querySelector("#studio4a-posts-mount");
 const layout = createLayoutManager();
 const media = createMediaManager();
+const transcode = createTranscodeManager();
 const pages = createPageManager();
 const settings = createSettingsManager();
+window.StudioTranscode = transcode;
 const modules = { layout, media, pages, settings };
 let active = "overview";
 

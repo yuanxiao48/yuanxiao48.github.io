@@ -23,6 +23,7 @@ pnpm-debug.log*
 # local Studio data and verification artifacts
 .studio-trash/
 .studio-tmp/
+.studio-local/
 .npm-cache/
 time-*-verification.png
 studio-*-verification.png

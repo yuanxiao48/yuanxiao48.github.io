@@ -13,13 +13,16 @@ import {
 	rename,
 	rm,
 	stat,
+	statfs,
 	unlink,
 	writeFile,
 } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { pipeline } from "node:stream/promises";
+import { Transform } from "node:stream";
 import { createMarkdownProcessor } from "@astrojs/markdown-remark";
 import remarkDirective from "remark-directive";
 import sanitizeHtml from "sanitize-html";
@@ -39,6 +42,15 @@ import {
 	normalizeEmbeddedMediaPath,
 	normalizeExternalVideoUrl,
 } from "./shared/media-embed-policy.mjs";
+import {
+	isTranscodeInputKind,
+	getTranscodeSourceKindForExtension,
+	isTranscodeTaskState,
+	supportsTranscodePlatform,
+	TRANSCODE_LOCAL_SETTINGS,
+	TRANSCODE_PROTOCOLS,
+	TRANSCODE_TASKS,
+} from "./shared/transcode-policy.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const settingsPath = path.join(root, "src", "config", "userSettings.json");
@@ -53,6 +65,9 @@ const publicPostImagesRoot = path.join(publicImagesRoot, "posts");
 const trashPostsRoot = path.join(root, ".studio-trash", "posts");
 const trashMediaRoot = path.join(root, ".studio-trash", "media");
 const mediaTempRoot = path.join(root, ".studio-tmp", "media");
+const transcodeTempRoot = path.join(root, ...TRANSCODE_TASKS.directory);
+const transcodeLocalSettingsRoot = path.join(root, ...TRANSCODE_LOCAL_SETTINGS.directory);
+const transcodeLocalSettingsPath = path.join(transcodeLocalSettingsRoot, TRANSCODE_LOCAL_SETTINGS.filename);
 const uiPath = path.join(root, "studio-ui.html");
 const editorScriptPath = path.join(root, "studio-editor.js");
 const editorStylesPath = path.join(root, "studio-editor.css");
@@ -67,13 +82,19 @@ const studioAssets = new Map([
 	["/studio-media.css", [path.join(root, "studio-media.css"), "text/css; charset=utf-8"]],
 	["/studio-article-media-picker.js", [path.join(root, "studio-article-media-picker.js"), "text/javascript; charset=utf-8"]],
 	["/studio-article-media-picker.css", [path.join(root, "studio-article-media-picker.css"), "text/css; charset=utf-8"]],
+	["/studio-transcode-manager.js", [path.join(root, "studio-transcode-manager.js"), "text/javascript; charset=utf-8"]],
+	["/studio-transcode.css", [path.join(root, "studio-transcode.css"), "text/css; charset=utf-8"]],
 ]);
 const port = Number(process.env.STUDIO_PORT || 4322);
 const MAX_PREVIEW_BODY_BYTES = 256 * 1024;
 const MAX_CONTENT_BODY_BYTES = 512 * 1024;
 const MEDIA_UPLOAD_MULTIPART_OVERHEAD = 256 * 1024;
 const MEDIA_TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const TOOL_DISCOVERY_TIMEOUT_MS = 5000;
+const TOOL_PROBE_TIMEOUT_MS = 10000;
+const TOOL_OUTPUT_MAX_BYTES = 1024 * 1024;
 const STUDIO_SESSION_TOKEN = randomUUID();
+const activeTranscodeSourceLocks = new Map();
 
 let previewMarkdownRendererPromise;
 
@@ -1348,6 +1369,7 @@ function hasValidMediaSignature(buffer, extension) {
 		case ".ogg": return buffer.toString("ascii", 0, 4) === "OggS";
 		case ".flac": return buffer.toString("ascii", 0, 4) === "fLaC";
 		case ".webm": return startsWithBytes(buffer, [0x1a, 0x45, 0xdf, 0xa3]) && buffer.toString("ascii").includes("webm");
+		case ".mkv": return startsWithBytes(buffer, [0x1a, 0x45, 0xdf, 0xa3]);
 		default: return false;
 	}
 }
@@ -1407,6 +1429,760 @@ function assertStudioWriteRequest(req) {
 	if (String(req.headers["x-studio-session"] || "") !== STUDIO_SESSION_TOKEN) {
 		throw new StudioError("Studio session verification failed", 403, "STUDIO_SESSION_INVALID");
 	}
+}
+
+function toolVersionLine(output) {
+	return String(output || "").split(/\r?\n/).find((line) => line.trim())?.trim().slice(0, 180) || "";
+}
+
+function configuredToolName(kind) {
+	return kind === "ffmpeg" ? "ffmpeg.exe" : "ffprobe.exe";
+}
+
+function isSafeConfiguredToolPath(value, kind) {
+	if (typeof value !== "string") return false;
+	const raw = value.trim();
+	if (!raw || raw.includes("\0") || /^\\\\/.test(raw) || /^(?:file|https?):/i.test(raw)) return false;
+	if (!path.isAbsolute(raw) || raw.split(/[\\/]+/).includes("..")) return false;
+	return path.basename(raw).toLowerCase() === configuredToolName(kind);
+}
+
+async function runLocalTool(executable, args, { timeoutMs = TOOL_DISCOVERY_TIMEOUT_MS, maxOutputBytes = TOOL_OUTPUT_MAX_BYTES } = {}) {
+	return new Promise((resolve, reject) => {
+		let stdout = "";
+		let stderr = "";
+		let outputBytes = 0;
+		let settled = false;
+		let timedOut = false;
+		let tooMuchOutput = false;
+		const child = spawn(executable, args, { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+		const complete = (handler, value) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			handler(value);
+		};
+		const timer = setTimeout(() => {
+			timedOut = true;
+			child.kill();
+		}, timeoutMs);
+		const collect = (target) => (chunk) => {
+			outputBytes += chunk.length;
+			if (outputBytes > maxOutputBytes) {
+				tooMuchOutput = true;
+				child.kill();
+				return;
+			}
+			if (target === "stdout") stdout += chunk.toString("utf8");
+			else stderr += chunk.toString("utf8");
+		};
+		child.stdout.on("data", collect("stdout"));
+		child.stderr.on("data", collect("stderr"));
+		child.on("error", (error) => complete(reject, new StudioError(`Unable to run local ${path.basename(executable)}: ${error.message}`, 503, "TRANSCODE_TOOL_UNAVAILABLE")));
+		child.on("close", (code, signal) => {
+			if (timedOut) return complete(reject, new StudioError("Local media tool timed out", 504, "TRANSCODE_TOOL_TIMEOUT"));
+			if (tooMuchOutput) return complete(reject, new StudioError("Local media tool produced too much output", 500, "TRANSCODE_TOOL_OUTPUT_LIMIT"));
+			if (code !== 0) return complete(reject, new StudioError(`Local media tool failed (${code ?? signal ?? "unknown"})`, 503, "TRANSCODE_TOOL_FAILED"));
+			complete(resolve, { stdout, stderr });
+		});
+	});
+}
+
+async function validateConfiguredToolPath(value, kind) {
+	if (!isSafeConfiguredToolPath(value, kind)) {
+		throw new StudioError(`Configured ${kind} path is invalid`, 400, "TRANSCODE_TOOL_PATH_INVALID");
+	}
+	const executable = path.resolve(value.trim());
+	const info = await lstat(executable).catch(() => null);
+	if (!info?.isFile() || info.isSymbolicLink()) {
+		throw new StudioError(`Configured ${kind} file is unavailable`, 400, "TRANSCODE_TOOL_PATH_INVALID");
+	}
+	const output = await runLocalTool(executable, ["-version"]);
+	const version = toolVersionLine(`${output.stdout}\n${output.stderr}`);
+	if (!new RegExp(`\\b${kind} version\\b`, "i").test(version)) {
+		throw new StudioError(`Configured file is not ${kind}`, 400, "TRANSCODE_TOOL_IDENTITY_INVALID");
+	}
+	return { command: executable, source: "settings", version };
+}
+
+async function readTranscodeLocalSettings() {
+	try {
+		const parsed = JSON.parse(await readFile(transcodeLocalSettingsPath, "utf8"));
+		return {
+			ffmpegPath: typeof parsed?.ffmpegPath === "string" ? parsed.ffmpegPath : "",
+			ffprobePath: typeof parsed?.ffprobePath === "string" ? parsed.ffprobePath : "",
+		};
+	} catch (error) {
+		if (error?.code === "ENOENT") return { ffmpegPath: "", ffprobePath: "" };
+		throw new StudioError("Local FFmpeg settings cannot be read safely", 500, "TRANSCODE_SETTINGS_READ_FAILED");
+	}
+}
+
+function publicTranscodeSettings(settings) {
+	return {
+		ok: true,
+		hasFfmpegPath: Boolean(settings.ffmpegPath),
+		hasFfprobePath: Boolean(settings.ffprobePath),
+	};
+}
+
+async function saveTranscodeLocalSettings(input) {
+	const current = await readTranscodeLocalSettings();
+	const next = { ...current };
+	for (const kind of ["ffmpeg", "ffprobe"]) {
+		const pathKey = `${kind}Path`;
+		const clearKey = `clear${kind[0].toUpperCase()}${kind.slice(1)}Path`;
+		if (input?.[clearKey] === true) {
+			next[pathKey] = "";
+			continue;
+		}
+		if (typeof input?.[pathKey] === "string" && input[pathKey].trim()) {
+			const verified = await validateConfiguredToolPath(input[pathKey], kind);
+			next[pathKey] = verified.command;
+		}
+	}
+	const localRoot = await ensureSafeDirectoryWithin(root, transcodeLocalSettingsRoot, { allowHidden: true });
+	await atomicWriteFile(path.join(localRoot.directory, TRANSCODE_LOCAL_SETTINGS.filename), `${JSON.stringify(next, null, 2)}\n`);
+	return publicTranscodeSettings(next);
+}
+
+async function discoverLocalTool(kind, configuredPath) {
+	if (!supportsTranscodePlatform()) return { available: false, source: "none", version: "", issue: "This Studio transcoder currently supports Windows only." };
+	if (configuredPath) {
+		try {
+			return { available: true, ...(await validateConfiguredToolPath(configuredPath, kind)) };
+		} catch (error) {
+			// A stale local path must not prevent a valid PATH installation from being used.
+			void error;
+		}
+	}
+	try {
+		const output = await runLocalTool(kind, ["-version"]);
+		const version = toolVersionLine(`${output.stdout}\n${output.stderr}`);
+		if (new RegExp(`\\b${kind} version\\b`, "i").test(version)) return { available: true, command: kind, source: "path", version };
+	} catch {
+		// Continue to a small, fixed list of conventional locations.
+	}
+	for (const base of ["C:\\Program Files\\ffmpeg\\bin", "C:\\Program Files (x86)\\ffmpeg\\bin", "C:\\ffmpeg\\bin", "C:\\tools\\ffmpeg\\bin"]) {
+		const candidate = path.join(base, configuredToolName(kind));
+		try {
+			const verified = await validateConfiguredToolPath(candidate, kind);
+			return { available: true, ...verified, source: "common" };
+		} catch {
+			// Fixed common locations are optional.
+		}
+	}
+	return { available: false, source: "none", version: "" };
+}
+
+function hasEncoder(output, name) {
+	return new RegExp(`(^|\\s)${name.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}(\\s|$)`, "m").test(output);
+}
+
+function hasFormat(output, name) {
+	return new RegExp(`(^|[,\\s])${name.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}(?=,|\\s|$)`, "mi").test(output);
+}
+
+async function getTranscodeCapabilities() {
+	const settings = await readTranscodeLocalSettings();
+	const [ffmpeg, ffprobe] = await Promise.all([
+		discoverLocalTool("ffmpeg", settings.ffmpegPath),
+		discoverLocalTool("ffprobe", settings.ffprobePath),
+	]);
+	let encoders = "";
+	let formats = "";
+	if (ffmpeg.available) {
+		try {
+			const [encoderResult, formatResult] = await Promise.all([
+				runLocalTool(ffmpeg.command, ["-encoders"]),
+				runLocalTool(ffmpeg.command, ["-formats"]),
+			]);
+			encoders = encoderResult.stdout;
+			formats = formatResult.stdout;
+		} catch { encoders = ""; formats = ""; }
+	}
+	const encoderFlags = {
+		libx264: hasEncoder(encoders, "libx264"),
+		h264NvencCompiled: hasEncoder(encoders, "h264_nvenc"),
+		aac: hasEncoder(encoders, "aac"),
+		libmp3lame: hasEncoder(encoders, "libmp3lame"),
+	};
+	return {
+		ok: true,
+		ffmpeg: { available: ffmpeg.available, pathSource: ffmpeg.source, version: ffmpeg.version },
+		ffprobe: { available: ffprobe.available, pathSource: ffprobe.source, version: ffprobe.version },
+		encoders: encoderFlags,
+		formats: { mp4: hasFormat(formats, "mp4"), m4a: hasFormat(formats, "m4a"), mp3: hasFormat(formats, "mp3") },
+		canProbe: ffprobe.available,
+		canTranscodeAudio: ffmpeg.available && encoderFlags.aac,
+		canTranscodeVideoCpu: ffmpeg.available && encoderFlags.libx264 && encoderFlags.aac,
+		canTestNvenc: ffmpeg.available && encoderFlags.h264NvencCompiled,
+	};
+}
+
+function numericProbeValue(value) {
+	const number = Number(value);
+	return Number.isFinite(number) ? number : null;
+}
+
+function probeFps(value) {
+	const parts = String(value || "").split("/").map(Number);
+	if (parts.length === 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1]) && parts[1] > 0) return Number((parts[0] / parts[1]).toFixed(3));
+	return numericProbeValue(value);
+}
+
+function mediaCompatibilitySummary(media, format, video, audio) {
+	const container = String(format?.format_name || "").toLowerCase();
+	const isMp4 = media.extension === ".mp4" && container.includes("mp4");
+	const videoCodec = String(video?.codec_name || "").toLowerCase();
+	const audioCodec = String(audio?.codec_name || "").toLowerCase();
+	const pixelFormat = String(video?.pix_fmt || "").toLowerCase();
+	if (!video && audio) {
+		return { status: "audio-only", label: "仅音轨", reason: `${audioCodec || "未知"} 音频轨；浏览器兼容性取决于格式和编码。` };
+	}
+	if (video && !audio) {
+		return { status: "video-without-audio", label: "视频无音轨", reason: "文件包含视频轨但没有音频轨。" };
+	}
+	if (!video && !audio) return { status: "unknown", label: "无法识别媒体轨道", reason: "ffprobe 没有返回音频或视频轨道。" };
+	if (videoCodec === "h264" && audioCodec === "aac" && isMp4 && pixelFormat === "yuv420p") {
+		return { status: "likely-compatible", label: "大概率浏览器兼容", reason: "检测到 MP4 容器、H.264 视频、AAC 音频和 yuv420p。" };
+	}
+	if (videoCodec === "hevc" || videoCodec === "h265" || ["hvc1", "hev1"].includes(String(video?.codec_tag_string || "").toLowerCase())) {
+		return { status: "likely-incompatible", label: "可能无法显示画面", reason: "检测到 HEVC/H.265；部分浏览器可能只有声音或无法显示画面。建议转换为 H.264 + AAC 的 MP4。" };
+	}
+	if (videoCodec === "av1") {
+		return { status: "unknown", label: "兼容性取决于浏览器", reason: "检测到 AV1；不同浏览器、系统和硬件的支持情况不同。" };
+	}
+	return { status: "unknown", label: "无法可靠判断兼容性", reason: `检测到 ${videoCodec || "未知"} 视频和 ${audioCodec || "未知"} 音频；容器扩展名本身不能保证浏览器可播放。` };
+}
+
+function summarizeMediaProbe(media, payload) {
+	const streams = Array.isArray(payload?.streams) ? payload.streams : [];
+	const format = isRecord(payload?.format) ? payload.format : {};
+	const video = streams.find((stream) => stream?.codec_type === "video") || null;
+	const audio = streams.find((stream) => stream?.codec_type === "audio") || null;
+	return {
+		path: media.publicPath,
+		kind: media.kind,
+		size: media.info.size,
+		container: String(format.format_name || "").split(",").filter(Boolean).join(", ") || "未知",
+		duration: numericProbeValue(format.duration),
+		bitrate: numericProbeValue(format.bit_rate),
+		hasVideo: Boolean(video),
+		hasAudio: Boolean(audio),
+		video: video ? {
+			codec: video.codec_name || null, codecTag: video.codec_tag_string || null, profile: video.profile || null,
+			level: numericProbeValue(video.level), width: numericProbeValue(video.width), height: numericProbeValue(video.height),
+			fps: probeFps(video.avg_frame_rate || video.r_frame_rate), pixelFormat: video.pix_fmt || null,
+			bitDepth: numericProbeValue(video.bits_per_raw_sample), color: {
+				space: video.color_space || null, transfer: video.color_transfer || null, primaries: video.color_primaries || null,
+			},
+		} : null,
+		audio: audio ? {
+			codec: audio.codec_name || null, sampleRate: numericProbeValue(audio.sample_rate), channels: numericProbeValue(audio.channels),
+			channelLayout: audio.channel_layout || null, bitrate: numericProbeValue(audio.bit_rate),
+		} : null,
+		compatibility: mediaCompatibilitySummary(media, format, video, audio),
+	};
+}
+
+async function probeApprovedMedia(input) {
+	const parsed = normalizeMediaPublicPath(input?.path);
+	if (!parsed || !isTranscodeInputKind(parsed.kind)) {
+		throw new StudioError("Only approved audio or video library paths can be analyzed", 400, "TRANSCODE_PROBE_PATH_INVALID");
+	}
+	const media = await getSafeMediaFile(parsed.publicPath);
+	if (!media.exists) throw new StudioError("Media file was not found", 404, "MEDIA_NOT_FOUND");
+	const capabilities = await getTranscodeCapabilities();
+	if (!capabilities.ffprobe.available) {
+		throw new StudioError("ffprobe is required to analyze media. Configure it locally before continuing.", 503, "FFPROBE_UNAVAILABLE");
+	}
+	const settings = await readTranscodeLocalSettings();
+	const ffprobe = await discoverLocalTool("ffprobe", settings.ffprobePath);
+	if (!ffprobe.available) throw new StudioError("ffprobe is unavailable", 503, "FFPROBE_UNAVAILABLE");
+	const output = await runLocalTool(ffprobe.command, [
+		"-v", "error", "-protocol_whitelist", TRANSCODE_PROTOCOLS.join(","), "-print_format", "json", "-show_format", "-show_streams", media.file,
+	], { timeoutMs: TOOL_PROBE_TIMEOUT_MS });
+	try {
+		return { ok: true, probe: summarizeMediaProbe(media, JSON.parse(output.stdout)) };
+	} catch {
+		throw new StudioError("ffprobe returned invalid media metadata", 502, "FFPROBE_OUTPUT_INVALID");
+	}
+}
+
+function safeTranscodeJobId(value) {
+	return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value) ? value : "";
+}
+
+function transcodeJobError(error) {
+	return {
+		code: error instanceof StudioError ? error.code : "TRANSCODE_SOURCE_FAILED",
+		message: error instanceof StudioError ? error.message : "Source preparation failed safely",
+	};
+}
+
+function transcodeJobSummary(job) {
+	return {
+		version: job.version,
+		id: job.id,
+		state: job.state,
+		createdAt: job.createdAt,
+		updatedAt: job.updatedAt,
+		sourceType: job.sourceType,
+		sourcePublicPath: job.sourcePublicPath || null,
+		sourceFilename: job.sourceFilename || null,
+		sourceSize: Number.isSafeInteger(job.sourceSize) ? job.sourceSize : null,
+		probe: job.probe || null,
+		preset: job.preset || null,
+		encoder: job.encoder || null,
+		progress: job.progress || null,
+		output: job.output || null,
+		error: job.error || null,
+	};
+}
+
+function validateTranscodeJob(value) {
+	if (!isRecord(value) || value.version !== TRANSCODE_TASKS.manifestVersion || !safeTranscodeJobId(value.id)
+		|| !isTranscodeTaskState(value.state) || !["upload", "library"].includes(value.sourceType)
+		|| typeof value.createdAt !== "string" || typeof value.updatedAt !== "string") {
+		throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
+	}
+	if (value.sourceType === "library") {
+		const parsed = normalizeMediaPublicPath(value.sourcePublicPath);
+		if (!parsed || !isTranscodeInputKind(parsed.kind)) {
+			throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
+		}
+	}
+	if (value.sourceType === "upload" && value.sourceStoredFilename !== null && value.sourceStoredFilename !== undefined) {
+		if (typeof value.sourceStoredFilename !== "string" || !/^source-[0-9a-f-]{36}\.[a-z0-9]+$/i.test(value.sourceStoredFilename)) {
+			throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
+		}
+	}
+	if (value.sourceSize !== null && value.sourceSize !== undefined && (!Number.isSafeInteger(value.sourceSize) || value.sourceSize < 0 || value.sourceSize > TRANSCODE_TASKS.sourceMaxBytes)) {
+		throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
+	}
+	return value;
+}
+
+async function getSafeTranscodeRoot() {
+	return ensureSafeDirectoryWithin(root, transcodeTempRoot, { allowHidden: true });
+}
+
+async function getSafeTranscodeTaskDirectory(id, { mustExist = true } = {}) {
+	const safeId = safeTranscodeJobId(id);
+	if (!safeId) throw new StudioError("Transcode task ID is invalid", 400, "TRANSCODE_JOB_ID_INVALID");
+	const taskRoot = await getSafeTranscodeRoot();
+	const directory = path.join(taskRoot.directory, safeId);
+	const info = await lstat(directory).catch(() => null);
+	if (!info) {
+		if (mustExist) throw new StudioError("Transcode task was not found", 404, "TRANSCODE_JOB_NOT_FOUND");
+		return { taskRoot, directory, exists: false };
+	}
+	if (!info.isDirectory() || info.isSymbolicLink()) throw new StudioError("Transcode task is invalid", 422, "TRANSCODE_JOB_INVALID");
+	await assertNoSymlinksWithin(taskRoot.directory, directory);
+	return { taskRoot, directory, exists: true };
+}
+
+async function writeTranscodeJob(directory, job) {
+	validateTranscodeJob(job);
+	await atomicWriteFile(path.join(directory, "job.json"), `${JSON.stringify(job, null, 2)}\n`);
+}
+
+async function readTranscodeJob(id) {
+	const task = await getSafeTranscodeTaskDirectory(id);
+	const manifestFile = path.join(task.directory, "job.json");
+	const info = await lstat(manifestFile).catch(() => null);
+	if (!info?.isFile() || info.isSymbolicLink()) {
+		throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
+	}
+	await assertNoSymlinksWithin(task.directory, manifestFile);
+	let job;
+	try {
+		job = validateTranscodeJob(JSON.parse(await readFile(manifestFile, "utf8")));
+	} catch (error) {
+		if (error instanceof StudioError) throw error;
+		throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
+	}
+	if (job.id !== id) throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
+	if (job.sourceType === "upload" && job.sourceStoredFilename) {
+		const sourceFile = path.join(task.directory, job.sourceStoredFilename);
+		const sourceInfo = await lstat(sourceFile).catch(() => null);
+		if (!sourceInfo?.isFile() || sourceInfo.isSymbolicLink()) {
+			throw new StudioError("Transcode source file is invalid", 422, "TRANSCODE_SOURCE_FILE_INVALID");
+		}
+		await assertNoSymlinksWithin(task.directory, sourceFile);
+	}
+	return { ...task, manifestFile, job };
+}
+
+function newTranscodeJob(sourceType) {
+	const now = new Date().toISOString();
+	return {
+		version: TRANSCODE_TASKS.manifestVersion,
+		id: randomUUID(),
+		state: "creating",
+		createdAt: now,
+		updatedAt: now,
+		sourceType,
+		sourcePublicPath: null,
+		sourceFilename: null,
+		sourceSize: null,
+		sourceStoredFilename: null,
+		probe: null,
+		preset: null,
+		encoder: null,
+		progress: null,
+		output: null,
+		error: null,
+	};
+}
+
+async function createTranscodeJobDirectory(job) {
+	const rootInfo = await getSafeTranscodeRoot();
+	const directory = path.join(rootInfo.directory, job.id);
+	await mkdir(directory, { recursive: false });
+	try {
+		await writeTranscodeJob(directory, job);
+		return directory;
+	} catch (error) {
+		await rm(directory, { recursive: true, force: true }).catch(() => {});
+		throw error;
+	}
+}
+
+function releaseTranscodeSourceLock(job) {
+	if (job?.sourceType === "library" && job.sourcePublicPath && activeTranscodeSourceLocks.get(job.sourcePublicPath) === job.id) {
+		activeTranscodeSourceLocks.delete(job.sourcePublicPath);
+	}
+}
+
+function lockTranscodeSource(job) {
+	if (job.sourceType !== "library" || !job.sourcePublicPath) return;
+	const existing = activeTranscodeSourceLocks.get(job.sourcePublicPath);
+	if (existing && existing !== job.id) {
+		throw new StudioError("This media file is already being prepared for transcoding", 409, "TRANSCODE_SOURCE_LOCKED");
+	}
+	activeTranscodeSourceLocks.set(job.sourcePublicPath, job.id);
+}
+
+function isMediaLockedForTranscode(publicPath) {
+	return activeTranscodeSourceLocks.has(publicPath);
+}
+
+async function assertTranscodeDiskSpace(expectedSourceBytes = 0) {
+	const taskRoot = await getSafeTranscodeRoot();
+	let filesystem;
+	try {
+		filesystem = await statfs(taskRoot.directory);
+	} catch {
+		throw new StudioError("Studio could not check local disk space", 503, "DISK_SPACE_UNAVAILABLE");
+	}
+	const available = BigInt(filesystem.bavail) * BigInt(filesystem.bsize);
+	const required = BigInt(Math.max(0, expectedSourceBytes)) * 2n + BigInt(TRANSCODE_TASKS.diskReserveBytes);
+	if (available < required) {
+		throw new StudioError("Local disk space is insufficient for this source file", 507, "DISK_SPACE_INSUFFICIENT");
+	}
+}
+
+function normalizeTranscodeSourceFilename(value) {
+	const raw = typeof value === "string" ? value.trim() : "";
+	if (!raw || raw.includes("\\") || raw.includes("/") || raw.includes("\0") || /^(?:[a-z]:|file:|https?:)/i.test(raw)) {
+		throw new StudioError("Source filename is invalid", 400, "TRANSCODE_SOURCE_FILENAME_INVALID");
+	}
+	const extension = path.extname(raw).toLowerCase();
+	const kind = getTranscodeSourceKindForExtension(extension);
+	if (!kind) throw new StudioError("This source media extension is not supported", 415, "TRANSCODE_SOURCE_EXTENSION_INVALID");
+	const stem = raw.slice(0, -extension.length)
+		.normalize("NFKC")
+		.replace(/\s+/g, "-")
+		.replace(/[^\p{L}\p{N}_-]+/gu, "")
+		.replace(/-+/g, "-")
+		.replace(/^[-_]+|[-_]+$/g, "")
+		.slice(0, 100);
+	if (!stem || stem.startsWith(".")) throw new StudioError("Source filename is invalid", 400, "TRANSCODE_SOURCE_FILENAME_INVALID");
+	return { filename: `${stem}${extension}`, extension, kind };
+}
+
+function transcodeSourceMimeMatchesExtension(mimeType, extension) {
+	const mime = String(mimeType || "").trim().toLowerCase();
+	if (!mime || mime === "application/octet-stream") return true;
+	const allowed = {
+		".mkv": new Set(["video/x-matroska", "video/matroska", "application/x-matroska"]),
+		".mp4": new Set(["video/mp4"]), ".webm": new Set(["video/webm"]), ".mov": new Set(["video/quicktime"]),
+		".mp3": new Set(["audio/mpeg", "audio/mp3"]), ".m4a": new Set(["audio/mp4", "audio/x-m4a"]),
+		".aac": new Set(["audio/aac", "audio/x-aac"]), ".wav": new Set(["audio/wav", "audio/x-wav", "audio/wave"]),
+		".ogg": new Set(["audio/ogg", "application/ogg"]), ".flac": new Set(["audio/flac", "audio/x-flac"]),
+	};
+	return allowed[extension]?.has(mime) ?? false;
+}
+
+async function validateTranscodeSourceFile(file, extension, mimeType) {
+	if (!getTranscodeSourceKindForExtension(extension) || !transcodeSourceMimeMatchesExtension(mimeType, extension)) {
+		throw new StudioError("Declared source media type is invalid", 415, "TRANSCODE_SOURCE_MIME_INVALID");
+	}
+	const handle = await open(file, "r");
+	const header = Buffer.alloc(8192);
+	let bytesRead = 0;
+	try {
+		({ bytesRead } = await handle.read(header, 0, header.length, 0));
+	} finally {
+		await handle.close();
+	}
+	if (!hasValidMediaSignature(header.subarray(0, bytesRead), extension)) {
+		throw new StudioError("Source file header does not match its extension", 415, "TRANSCODE_SOURCE_SIGNATURE_INVALID");
+	}
+}
+
+async function probeTranscodeSource(media) {
+	const capabilities = await getTranscodeCapabilities();
+	if (!capabilities.ffprobe.available) {
+		throw new StudioError("ffprobe is required to analyze media. Configure it locally before continuing.", 503, "FFPROBE_UNAVAILABLE");
+	}
+	const settings = await readTranscodeLocalSettings();
+	const ffprobe = await discoverLocalTool("ffprobe", settings.ffprobePath);
+	if (!ffprobe.available) throw new StudioError("ffprobe is unavailable", 503, "FFPROBE_UNAVAILABLE");
+	const output = await runLocalTool(ffprobe.command, [
+		"-v", "error", "-protocol_whitelist", TRANSCODE_PROTOCOLS.join(","), "-print_format", "json", "-show_format", "-show_streams", media.file,
+	], { timeoutMs: TOOL_PROBE_TIMEOUT_MS });
+	try {
+		const probe = summarizeMediaProbe(media, JSON.parse(output.stdout));
+		if (!probe.hasVideo && !probe.hasAudio) {
+			throw new StudioError("The source has no usable audio or video tracks", 422, "TRANSCODE_SOURCE_NO_TRACKS");
+		}
+		return probe;
+	} catch (error) {
+		if (error instanceof StudioError) throw error;
+		throw new StudioError("ffprobe returned invalid media metadata", 502, "FFPROBE_OUTPUT_INVALID");
+	}
+}
+
+async function markTranscodeJobFailed(directory, job, error) {
+	job.state = "failed";
+	job.updatedAt = new Date().toISOString();
+	job.error = transcodeJobError(error);
+	await writeTranscodeJob(directory, job);
+	releaseTranscodeSourceLock(job);
+	return { ok: true, job: transcodeJobSummary(job) };
+}
+
+async function createTranscodeJobFromLibrary(input) {
+	const parsed = normalizeMediaPublicPath(input?.path);
+	if (!parsed || !isTranscodeInputKind(parsed.kind)) {
+		throw new StudioError("Only approved audio or video library paths can be used", 400, "TRANSCODE_SOURCE_PATH_INVALID");
+	}
+	const media = await getSafeMediaFile(parsed.publicPath);
+	if (!media.exists) throw new StudioError("Media file was not found", 404, "MEDIA_NOT_FOUND");
+	const job = newTranscodeJob("library");
+	job.sourcePublicPath = media.publicPath;
+	job.sourceFilename = path.basename(media.relativePath);
+	job.sourceSize = media.info.size;
+	await assertTranscodeDiskSpace(job.sourceSize);
+	lockTranscodeSource(job);
+	let directory = "";
+	try {
+		directory = await createTranscodeJobDirectory(job);
+		job.state = "probing";
+		job.updatedAt = new Date().toISOString();
+		await writeTranscodeJob(directory, job);
+		job.probe = await probeTranscodeSource(media);
+		job.state = "ready";
+		job.updatedAt = new Date().toISOString();
+		await writeTranscodeJob(directory, job);
+		return { ok: true, job: transcodeJobSummary(job) };
+	} catch (error) {
+		if (!directory) {
+			releaseTranscodeSourceLock(job);
+			throw error;
+		}
+		return markTranscodeJobFailed(directory, job, error);
+	}
+}
+
+class TranscodeDiskCheckTransform extends Transform {
+	constructor() {
+		super();
+		this.received = 0;
+		this.lastChecked = 0;
+	}
+	_transform(chunk, encoding, callback) {
+		this.received += chunk.length;
+		if (this.received - this.lastChecked < TRANSCODE_TASKS.diskCheckIntervalBytes) {
+			callback(null, chunk);
+			return;
+		}
+		assertTranscodeDiskSpace(this.received)
+			.then(() => { this.lastChecked = this.received; callback(null, chunk); })
+			.catch(callback);
+	}
+}
+
+async function receiveTranscodeSourceUpload(req) {
+	const declaredLength = Number(req.headers["content-length"] || 0);
+	if (Number.isFinite(declaredLength) && declaredLength > TRANSCODE_TASKS.sourceMaxBytes + MEDIA_UPLOAD_MULTIPART_OVERHEAD) {
+		req.resume();
+		throw new StudioError("Source upload exceeds the 1 GB limit", 413, "TRANSCODE_SOURCE_TOO_LARGE");
+	}
+	if (!String(req.headers["content-type"] || "").toLowerCase().startsWith("multipart/form-data")) {
+		throw new StudioError("Source upload must use multipart/form-data", 415, "TRANSCODE_SOURCE_MULTIPART_REQUIRED");
+	}
+	await assertTranscodeDiskSpace(0);
+	const job = newTranscodeJob("upload");
+	const directory = await createTranscodeJobDirectory(job);
+	job.state = "uploading";
+	job.updatedAt = new Date().toISOString();
+	await writeTranscodeJob(directory, job);
+	let partFile = "";
+	let finalFile = "";
+	let received = null;
+	let tooLarge = false;
+	let parserError = null;
+	let aborted = false;
+	let writePromise = Promise.resolve();
+	const busboy = Busboy({ headers: req.headers, limits: { files: 1, fileSize: TRANSCODE_TASKS.sourceMaxBytes, fields: 4, fieldSize: 4096, parts: 8 } });
+	const complete = new Promise((resolve, reject) => {
+		busboy.on("file", (fieldName, stream, info) => {
+			if (fieldName !== "file" || received) {
+				stream.resume(); parserError ||= new StudioError("Upload must include exactly one source file", 400, "TRANSCODE_SOURCE_FILE_FIELD_INVALID"); return;
+			}
+			received = { filename: info.filename, mimeType: info.mimeType };
+			partFile = path.join(directory, `source-${job.id}.part`);
+			stream.on("limit", () => { tooLarge = true; });
+			writePromise = pipeline(stream, new TranscodeDiskCheckTransform(), createWriteStream(partFile, { flags: "wx" }));
+			writePromise.catch((error) => { parserError ||= error; });
+		});
+		busboy.on("filesLimit", () => { parserError ||= new StudioError("Only one source file may be uploaded", 400, "TRANSCODE_SOURCE_FILE_COUNT_INVALID"); });
+		busboy.on("partsLimit", () => { parserError ||= new StudioError("Source upload has too many multipart parts", 400, "TRANSCODE_SOURCE_MULTIPART_INVALID"); });
+		busboy.on("error", reject);
+		busboy.on("finish", resolve);
+		req.on("aborted", () => { aborted = true; reject(new StudioError("Source upload was cancelled", 499, "TRANSCODE_SOURCE_UPLOAD_ABORTED")); });
+	});
+	try {
+		req.pipe(busboy);
+		await complete;
+		await writePromise;
+		if (aborted) throw new StudioError("Source upload was cancelled", 499, "TRANSCODE_SOURCE_UPLOAD_ABORTED");
+		if (parserError) throw parserError;
+		if (tooLarge) throw new StudioError("Source upload exceeds the 1 GB limit", 413, "TRANSCODE_SOURCE_TOO_LARGE");
+		if (!received || !partFile) throw new StudioError("No source file was received", 400, "TRANSCODE_SOURCE_FILE_REQUIRED");
+		const source = normalizeTranscodeSourceFilename(received.filename);
+		const info = await stat(partFile);
+		if (info.size > TRANSCODE_TASKS.sourceMaxBytes) throw new StudioError("Source upload exceeds the 1 GB limit", 413, "TRANSCODE_SOURCE_TOO_LARGE");
+		await validateTranscodeSourceFile(partFile, source.extension, received.mimeType);
+		finalFile = path.join(directory, `source-${job.id}${source.extension}`);
+		await rename(partFile, finalFile);
+		partFile = "";
+		job.sourceFilename = source.filename;
+		job.sourceStoredFilename = path.basename(finalFile);
+		job.sourceSize = info.size;
+		job.state = "probing";
+		job.updatedAt = new Date().toISOString();
+		await writeTranscodeJob(directory, job);
+		const media = { file: finalFile, publicPath: null, kind: source.kind, extension: source.extension, info };
+		job.probe = await probeTranscodeSource(media);
+		job.state = "ready";
+		job.updatedAt = new Date().toISOString();
+		await writeTranscodeJob(directory, job);
+		return { ok: true, job: transcodeJobSummary(job) };
+	} catch (error) {
+		if (partFile) {
+			await writePromise.catch(() => {});
+			await safeRemove(partFile);
+		}
+		if (aborted) {
+			job.state = "discarded"; job.updatedAt = new Date().toISOString(); job.error = transcodeJobError(error);
+			await writeTranscodeJob(directory, job).catch(() => {});
+			await rm(directory, { recursive: true, force: true }).catch(() => {});
+			throw error;
+		}
+		return markTranscodeJobFailed(directory, job, error);
+	}
+}
+
+async function discardTranscodeJob(id) {
+	const task = await readTranscodeJob(id);
+	const { job } = task;
+	job.state = "discarded";
+	job.updatedAt = new Date().toISOString();
+	await writeTranscodeJob(task.directory, job);
+	releaseTranscodeSourceLock(job);
+	await rm(task.directory, { recursive: true, force: true });
+	return { ok: true, id: job.id, discarded: true };
+}
+
+async function listTranscodeJobs() {
+	const taskRoot = await getSafeTranscodeRoot();
+	const items = [];
+	const errors = [];
+	for (const entry of await readdir(taskRoot.directory, { withFileTypes: true })) {
+		if (!entry.isDirectory() || entry.isSymbolicLink() || !safeTranscodeJobId(entry.name)) continue;
+		try {
+			items.push(transcodeJobSummary((await readTranscodeJob(entry.name)).job));
+		} catch {
+			errors.push({ id: entry.name, error: "Task manifest could not be read safely" });
+		}
+	}
+	items.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)) || a.id.localeCompare(b.id));
+	return { ok: true, items, errors };
+}
+
+async function quarantineCorruptTranscodeTask(taskRoot, entryName) {
+	const target = path.join(taskRoot.directory, entryName);
+	const quarantined = path.join(taskRoot.directory, `corrupt-${entryName}`);
+	if (await pathExists(quarantined)) return false;
+	await rename(target, quarantined);
+	return true;
+}
+
+async function cleanupTranscodeTasks({ onlyExpired = false } = {}) {
+	const taskRoot = await getSafeTranscodeRoot();
+	const now = Date.now();
+	const result = { ok: true, removed: 0, interrupted: 0, quarantined: 0, errors: [] };
+	for (const entry of await readdir(taskRoot.directory, { withFileTypes: true })) {
+		if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+		if (!safeTranscodeJobId(entry.name)) continue;
+		let task;
+		try {
+			task = await readTranscodeJob(entry.name);
+		} catch {
+			try { if (await quarantineCorruptTranscodeTask(taskRoot, entry.name)) result.quarantined += 1; }
+			catch { result.errors.push({ id: entry.name, error: "Corrupt task could not be isolated" }); }
+			continue;
+		}
+		const { job, directory } = task;
+		if (!onlyExpired && ["creating", "uploading", "probing"].includes(job.state)) {
+			for (const child of await readdir(directory, { withFileTypes: true })) {
+				if (child.isFile() && !child.isSymbolicLink() && (child.name.endsWith(".part") || child.name.startsWith("output"))) await safeRemove(path.join(directory, child.name));
+			}
+			job.state = "interrupted";
+			job.updatedAt = new Date().toISOString();
+			job.error = { code: "STUDIO_RESTARTED", message: "Studio restarted before source preparation completed" };
+			await writeTranscodeJob(directory, job);
+			releaseTranscodeSourceLock(job);
+			result.interrupted += 1;
+		}
+		const age = now - Date.parse(job.updatedAt || job.createdAt);
+		if (Number.isFinite(age) && age > TRANSCODE_TASKS.completedResultRetentionMs && ["ready", "failed", "interrupted", "discarded"].includes(job.state)) {
+			releaseTranscodeSourceLock(job);
+			await rm(directory, { recursive: true, force: true });
+			result.removed += 1;
+		}
+	}
+	if (!onlyExpired) {
+		for (const entry of await readdir(taskRoot.directory, { withFileTypes: true })) {
+			if (!entry.isDirectory() || entry.isSymbolicLink() || !safeTranscodeJobId(entry.name)) continue;
+			try {
+				const task = await readTranscodeJob(entry.name);
+				if (task.job.state === "ready" && task.job.sourceType === "library") {
+					const source = await getSafeMediaFile(task.job.sourcePublicPath);
+					if (!source.exists) throw new StudioError("Library source is no longer available", 409, "TRANSCODE_SOURCE_MISSING");
+					lockTranscodeSource(task.job);
+				}
+			} catch {
+				// A later explicit task read exposes the safe error; startup must stay available.
+			}
+		}
+	}
+	return result;
 }
 
 async function nextAvailableMediaFilename(directory, filename) {
@@ -1573,6 +2349,9 @@ async function listMediaTrash() {
 async function moveMediaToTrash(input) {
 	const media = await getSafeMediaFile(input?.path);
 	if (!media.exists) throw new StudioError("Media file was not found", 404, "MEDIA_NOT_FOUND");
+	if (isMediaLockedForTranscode(media.publicPath)) {
+		throw new StudioError("This media file is currently used by an active transcode task", 409, "MEDIA_TRANSCODE_LOCKED");
+	}
 	const referencesPayload = await findMediaReferences(media.publicPath);
 	const references = referencesPayload.references || [];
 	if (references.length && input?.confirmReferenced !== true) {
@@ -2580,6 +3359,54 @@ const server = createServer(async (req, res) => {
 			send(res, 200, await findMediaReferences(url.searchParams.get("path")));
 			return;
 		}
+		if (req.method === "GET" && url.pathname === "/api/transcode/capabilities") {
+			send(res, 200, await getTranscodeCapabilities());
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/transcode/settings") {
+			send(res, 200, publicTranscodeSettings(await readTranscodeLocalSettings()));
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/transcode/settings") {
+			assertStudioWriteRequest(req);
+			send(res, 200, await saveTranscodeLocalSettings(await readContentBody(req)));
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/transcode/probe") {
+			assertStudioWriteRequest(req);
+			send(res, 200, await probeApprovedMedia(await readContentBody(req)));
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/transcode/jobs") {
+			send(res, 200, await listTranscodeJobs());
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/transcode/jobs/from-library") {
+			assertStudioWriteRequest(req);
+			send(res, 201, await createTranscodeJobFromLibrary(await readContentBody(req)));
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/transcode/jobs/upload") {
+			assertStudioWriteRequest(req);
+			send(res, 201, await receiveTranscodeSourceUpload(req));
+			return;
+		}
+		const transcodeJobMatch = url.pathname.match(/^\/api\/transcode\/jobs\/([0-9a-f-]{36})$/i);
+		if (req.method === "GET" && transcodeJobMatch) {
+			send(res, 200, { ok: true, job: transcodeJobSummary((await readTranscodeJob(transcodeJobMatch[1])).job) });
+			return;
+		}
+		const transcodeDiscardMatch = url.pathname.match(/^\/api\/transcode\/jobs\/([0-9a-f-]{36})\/discard$/i);
+		if (req.method === "POST" && transcodeDiscardMatch) {
+			assertStudioWriteRequest(req);
+			send(res, 200, await discardTranscodeJob(transcodeDiscardMatch[1]));
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/transcode/jobs/cleanup") {
+			assertStudioWriteRequest(req);
+			send(res, 200, await cleanupTranscodeTasks({ onlyExpired: true }));
+			return;
+		}
 		if (req.method === "POST" && url.pathname === "/api/media") {
 			assertStudioWriteRequest(req);
 			const kind = normalizeMediaKind(url.searchParams.get("kind"), "");
@@ -2679,6 +3506,8 @@ const server = createServer(async (req, res) => {
 
 cleanupStaleMediaTemps()
 	.catch((error) => console.warn("Studio media temp cleanup skipped:", error.message))
+	.then(() => cleanupTranscodeTasks())
+	.catch((error) => console.warn("Studio transcode task cleanup skipped:", error.message))
 	.finally(() => {
 		server.listen(port, "127.0.0.1", () => {
 			console.log(`Blog Studio: http://127.0.0.1:${port}/`);

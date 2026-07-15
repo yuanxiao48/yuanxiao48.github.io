@@ -68,7 +68,9 @@ export function createMediaManager() {
 	const refreshButton = document.querySelector("#mediaRefresh");
 	const kindButtons = [...document.querySelectorAll("[data-media-kind]")];
 	const libraryTab = document.querySelector("#mediaLibraryTab");
+	const transcodeTab = document.querySelector("#mediaTranscodeTab");
 	const trashTab = document.querySelector("#mediaTrashTab");
+	const libraryPanel = document.querySelector("#mediaLibraryPanel");
 	const libraryControls = document.querySelector("#mediaLibraryControls");
 	const uploadPanel = document.querySelector("#mediaUploadPanel");
 	const uploadKind = document.querySelector("#mediaUploadKind");
@@ -112,15 +114,24 @@ export function createMediaManager() {
 		currentView = view;
 		libraryTab?.classList.toggle("active", view === "library");
 		libraryTab?.setAttribute("aria-selected", String(view === "library"));
+		transcodeTab?.classList.toggle("active", view === "transcode");
+		transcodeTab?.setAttribute("aria-selected", String(view === "transcode"));
 		trashTab?.classList.toggle("active", view === "trash");
 		trashTab?.setAttribute("aria-selected", String(view === "trash"));
+		libraryPanel?.classList.toggle("hidden", view === "transcode");
+		if (view === "transcode") {
+			window.StudioTranscode?.show?.();
+			window.StudioTranscode?.load?.().catch((error) => console.error(error));
+			return;
+		}
+		window.StudioTranscode?.hide?.();
 		libraryControls?.classList.toggle("hidden", view !== "library");
 		uploadPanel?.classList.toggle("hidden", view !== "library");
 		load().catch((error) => console.error(error));
 	}
 
 	function renderEmpty(message, failed = false) {
-		if (!list) return;
+		if (!list || currentView === "transcode") return;
 		list.replaceChildren();
 		const empty = document.createElement("p");
 		empty.className = `studio-media-empty${failed ? " error" : ""}`;
@@ -241,6 +252,12 @@ export function createMediaManager() {
 	}
 
 	async function load() {
+		if (currentView === "transcode") {
+			libraryPanel?.classList.add("hidden");
+			window.StudioTranscode?.show?.();
+			await window.StudioTranscode?.load?.();
+			return;
+		}
 		const sequence = ++requestSequence;
 		setStatus(currentView === "library" ? "正在加载媒体库…" : "正在加载媒体回收站…", "loading");
 		retryButton?.classList.add("hidden"); if (list) list.replaceChildren();
@@ -367,7 +384,7 @@ export function createMediaManager() {
 		});
 		searchInput?.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { if (currentView === "library") load(); }, 220); });
 		refreshButton?.addEventListener("click", () => load()); retryButton?.addEventListener("click", () => load());
-		libraryTab?.addEventListener("click", () => setView("library")); trashTab?.addEventListener("click", () => setView("trash"));
+		libraryTab?.addEventListener("click", () => setView("library")); transcodeTab?.addEventListener("click", () => setView("transcode")); trashTab?.addEventListener("click", () => setView("trash"));
 		uploadKind?.addEventListener("change", updateUploadKindHint); uploadStart?.addEventListener("click", startUpload); uploadCancel?.addEventListener("click", cancelUpload);
 	}
 
