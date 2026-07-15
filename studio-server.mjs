@@ -6,6 +6,7 @@ import {
 	mkdir,
 	readFile,
 	readdir,
+	realpath,
 	rename,
 	rm,
 	stat,
@@ -16,6 +17,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMarkdownProcessor } from "@astrojs/markdown-remark";
 import sanitizeHtml from "sanitize-html";
+import {
+	getMediaPolicy,
+	MEDIA_KINDS,
+	normalizeMediaKind,
+	normalizeMediaPublicPath,
+	normalizeMediaSearch,
+} from "./shared/media-policy.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const settingsPath = path.join(root, "src", "config", "userSettings.json");
@@ -38,6 +46,8 @@ const studioAssets = new Map([
 	["/studio-page-manager.js", [path.join(root, "studio-page-manager.js"), "text/javascript; charset=utf-8"]],
 	["/studio-settings-manager.js", [path.join(root, "studio-settings-manager.js"), "text/javascript; charset=utf-8"]],
 	["/studio-shell.js", [path.join(root, "studio-shell.js"), "text/javascript; charset=utf-8"]],
+	["/studio-media-manager.js", [path.join(root, "studio-media-manager.js"), "text/javascript; charset=utf-8"]],
+	["/studio-media.css", [path.join(root, "studio-media.css"), "text/css; charset=utf-8"]],
 ]);
 const port = Number(process.env.STUDIO_PORT || 4322);
 const MAX_PREVIEW_BODY_BYTES = 256 * 1024;
@@ -68,7 +78,17 @@ const imageExtensions = new Set([
 	".svg",
 	".webp",
 ]);
-const previewMediaExtensions = new Set([".m4a", ".mp3", ".mp4", ".ogg", ".wav", ".webm"]);
+const previewMediaExtensions = new Set([
+	".aac",
+	".flac",
+	".m4a",
+	".mov",
+	".mp3",
+	".mp4",
+	".ogg",
+	".wav",
+	".webm",
+]);
 const copyablePostResourceExtensions = new Set([
 	".avif",
 	".gif",
@@ -87,6 +107,8 @@ const copyablePostResourceExtensions = new Set([
 ]);
 const imageContentTypes = new Map([
 	[".avif", "image/avif"],
+	[".aac", "audio/aac"],
+	[".flac", "audio/flac"],
 	[".gif", "image/gif"],
 	[".jpeg", "image/jpeg"],
 	[".jpg", "image/jpeg"],
@@ -94,6 +116,7 @@ const imageContentTypes = new Map([
 	[".svg", "image/svg+xml"],
 	[".webp", "image/webp"],
 	[".m4a", "audio/mp4"],
+	[".mov", "video/quicktime"],
 	[".mp3", "audio/mpeg"],
 	[".mp4", "video/mp4"],
 	[".ogg", "audio/ogg"],
@@ -952,6 +975,192 @@ async function resolvePreviewAsset(urlPath) {
 	const info = await lstat(fullPath).catch(() => null);
 	if (!info?.isFile() || info.isSymbolicLink()) throw new StudioError("预览图片不存在", 404);
 	return { fullPath, ext };
+}
+
+function isInsidePath(base, candidate) {
+	const relative = path.relative(base, candidate);
+	return relative && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function hasHiddenPathPart(relativePath) {
+	return relativePath.split(/[\\/]/).some((part) => part.startsWith("."));
+}
+
+async function getSafeMediaRoot(kind) {
+	const policy = getMediaPolicy(kind);
+	if (!policy) throw new StudioError("Unsupported media kind", 400);
+	const mediaRoot = path.resolve(publicAssetsRoot, ...policy.directory);
+	if (!isInsidePath(publicAssetsRoot, mediaRoot)) {
+		throw new StudioError("Media root is invalid", 500);
+	}
+	let info;
+	try {
+		info = await lstat(mediaRoot);
+	} catch (error) {
+		if (error?.code === "ENOENT") return null;
+		throw new StudioError("Media directory cannot be read", 500);
+	}
+	if (!info.isDirectory() || info.isSymbolicLink()) {
+		throw new StudioError("Media directory is not available", 500);
+	}
+	const [resolvedPublicAssets, resolvedMediaRoot] = await Promise.all([
+		realpath(publicAssetsRoot),
+		realpath(mediaRoot),
+	]);
+	if (!isInsidePath(resolvedPublicAssets, resolvedMediaRoot)) {
+		throw new StudioError("Media directory escapes public assets", 500);
+	}
+	return { policy, mediaRoot, resolvedMediaRoot };
+}
+
+async function getSafeMediaFile(mediaPath) {
+	const parsed = normalizeMediaPublicPath(mediaPath);
+	if (!parsed) throw new StudioError("Media path is invalid", 400);
+	const rootInfo = await getSafeMediaRoot(parsed.kind);
+	if (!rootInfo) return { ...parsed, exists: false };
+	const file = path.resolve(rootInfo.mediaRoot, parsed.relativePath);
+	if (!isInsidePath(rootInfo.mediaRoot, file) || hasHiddenPathPart(parsed.relativePath)) {
+		throw new StudioError("Media path is invalid", 400);
+	}
+	let info;
+	try {
+		info = await lstat(file);
+	} catch (error) {
+		if (error?.code === "ENOENT") return { ...parsed, exists: false };
+		throw new StudioError("Media file cannot be read", 500);
+	}
+	if (!info.isFile() || info.isSymbolicLink()) return { ...parsed, exists: false };
+	const resolvedFile = await realpath(file);
+	if (!isInsidePath(rootInfo.resolvedMediaRoot, resolvedFile)) {
+		throw new StudioError("Media file escapes its approved directory", 400);
+	}
+	return { ...parsed, exists: true, file, info };
+}
+
+async function listMediaFiles(kind, errors) {
+	const rootInfo = await getSafeMediaRoot(kind);
+	if (!rootInfo) return [];
+	const items = [];
+	async function visit(directory, parentRelative = "") {
+		let entries;
+		try {
+			entries = await readdir(directory, { withFileTypes: true });
+		} catch (error) {
+			errors.push({ kind, relativePath: parentRelative, error: "Directory could not be read" });
+			return;
+		}
+		for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+			if (entry.name.startsWith(".")) continue;
+			const relativePath = parentRelative ? `${parentRelative}/${entry.name}` : entry.name;
+			const fullPath = path.join(directory, entry.name);
+			if (entry.isSymbolicLink()) continue;
+			if (entry.isDirectory()) {
+				await visit(fullPath, relativePath);
+				continue;
+			}
+			if (!entry.isFile()) continue;
+			const extension = path.extname(entry.name).toLowerCase();
+			if (!rootInfo.policy.extensions.includes(extension) || hasHiddenPathPart(relativePath)) continue;
+			try {
+				const resolvedFile = await realpath(fullPath);
+				if (!isInsidePath(rootInfo.resolvedMediaRoot, resolvedFile)) {
+					errors.push({ kind, relativePath, error: "File was skipped because its path is unsafe" });
+					continue;
+				}
+				const info = await stat(fullPath);
+				items.push({
+					kind,
+					name: entry.name,
+					publicPath: `${rootInfo.policy.publicPrefix}${relativePath}`,
+					relativePath,
+					size: info.size,
+					modifiedAt: info.mtime.toISOString(),
+				});
+			} catch {
+				errors.push({ kind, relativePath, error: "File could not be read" });
+			}
+		}
+	}
+	await visit(rootInfo.mediaRoot);
+	return items;
+}
+
+async function listMedia(input) {
+	const kind = normalizeMediaKind(input?.kind);
+	if (!kind) throw new StudioError("Media kind must be all, image, audio, or video", 400);
+	const search = normalizeMediaSearch(input?.search).toLocaleLowerCase();
+	const errors = [];
+	const kinds = kind === "all" ? MEDIA_KINDS : [kind];
+	const items = (await Promise.all(kinds.map((itemKind) => listMediaFiles(itemKind, errors))))
+		.flat()
+		.filter((item) => !search || item.name.toLocaleLowerCase().includes(search))
+		.sort((a, b) => {
+			const modified = String(b.modifiedAt).localeCompare(String(a.modifiedAt));
+			return modified || a.name.localeCompare(b.name) || a.publicPath.localeCompare(b.publicPath);
+		});
+	return { ok: true, items, errors };
+}
+
+function escapeRegExp(value) {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function mediaReferencePattern(publicPath) {
+	const barePath = publicPath.slice(1);
+	return new RegExp(
+		`(?:^|[^A-Za-z0-9._/-])(?:${escapeRegExp(publicPath)}|${escapeRegExp(barePath)})(?=$|[^A-Za-z0-9._/-])`,
+	);
+}
+
+async function collectReferenceFiles(directory, extensions, list = []) {
+	let info;
+	try {
+		info = await lstat(directory);
+	} catch (error) {
+		if (error?.code === "ENOENT") return list;
+		throw new StudioError("Reference directory cannot be read", 500);
+	}
+	if (info.isSymbolicLink()) return list;
+	if (info.isFile()) {
+		if (extensions.has(path.extname(directory).toLowerCase())) list.push(directory);
+		return list;
+	}
+	for (const entry of await readdir(directory, { withFileTypes: true })) {
+		if (entry.name.startsWith(".") || entry.isSymbolicLink()) continue;
+		await collectReferenceFiles(path.join(directory, entry.name), extensions, list);
+	}
+	return list;
+}
+
+async function findMediaReferences(mediaPath) {
+	const media = await getSafeMediaFile(mediaPath);
+	if (!media.exists) return { ok: true, path: media.publicPath, exists: false, references: [] };
+	const markdownFiles = await Promise.all([
+		collectReferenceFiles(postsRoot, new Set([".md", ".mdx"])),
+		collectReferenceFiles(path.join(root, "src", "content", "spec"), new Set([".md", ".mdx"])),
+	]);
+	const configFiles = await collectReferenceFiles(
+		path.join(root, "src", "config"),
+		new Set([".json", ".js", ".mjs", ".ts"]),
+	);
+	const pattern = mediaReferencePattern(media.publicPath);
+	const references = [];
+	for (const file of [...markdownFiles.flat(), ...configFiles]) {
+		try {
+			const contents = await readFile(file, "utf8");
+			for (const [index, line] of contents.split(/\r?\n/).entries()) {
+				if (!pattern.test(line)) continue;
+				references.push({
+					file: path.relative(root, file).replace(/\\/g, "/"),
+					line: index + 1,
+					text: line.trim().slice(0, 240),
+				});
+			}
+		} catch {
+			// A single unreadable text file must not prevent a safe reference result.
+		}
+	}
+	return { ok: true, path: media.publicPath, exists: true, references };
 }
 
 function slugify(value) {
@@ -1845,6 +2054,17 @@ const server = createServer(async (req, res) => {
 		}
 		if (req.method === "POST" && url.pathname === "/api/content-settings") {
 			send(res, 200, await saveContentSettings(await readContentBody(req)));
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/media") {
+			send(res, 200, await listMedia({
+				kind: url.searchParams.get("kind") || "all",
+				search: url.searchParams.get("search") || "",
+			}));
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/media/references") {
+			send(res, 200, await findMediaReferences(url.searchParams.get("path")));
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/images") {

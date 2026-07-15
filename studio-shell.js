@@ -1,4 +1,5 @@
 import { createLayoutManager } from "./studio-layout-manager.js";
+import { createMediaManager } from "./studio-media-manager.js";
 import { createPageManager } from "./studio-page-manager.js";
 import { createSettingsManager } from "./studio-settings-manager.js";
 
@@ -8,9 +9,10 @@ const legacyTabs = document.querySelector(".tabs");
 const postsPanel = document.querySelector('[data-panel="posts"]');
 const postsMount = document.querySelector("#studio4a-posts-mount");
 const layout = createLayoutManager();
+const media = createMediaManager();
 const pages = createPageManager();
 const settings = createSettingsManager();
-const modules = { layout, pages, settings };
+const modules = { layout, media, pages, settings };
 let active = "overview";
 
 legacyTabs?.classList.add("legacy-tabs");
@@ -43,6 +45,7 @@ async function activate(name) {
 		else document.querySelector(`[data-post-view="${view}"]`)?.click();
 	}
 	if (name === "layout") layout.load().catch((error) => console.error(error));
+	if (name === "media") media.load().catch((error) => console.error(error));
 	if (name === "pages") pages.load().catch((error) => console.error(error));
 	if (name === "settings") settings.load().catch((error) => console.error(error));
 }

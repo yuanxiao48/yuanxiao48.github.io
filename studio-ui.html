@@ -6,6 +6,7 @@
 		<title>博客操作台</title>
 		<link rel="stylesheet" href="./studio-editor.css" />
 		<link rel="stylesheet" href="./studio-cms.css" />
+		<link rel="stylesheet" href="./studio-media.css" />
 		<style>
 			:root {
 				color-scheme: dark;
@@ -572,7 +573,29 @@
 							<div class="studio4a-module-header"><div><h2>设置</h2><p>只保存当前填写的站点、个人资料与公告字段。</p></div><div><span id="contentSettingsStatus" class="studio4a-save-status">正在读取</span><button id="contentSettingsSave" class="btn primary" type="button">保存资料与公告</button></div></div>
 							<div class="studio4a-settings-grid"><section class="studio4a-settings-section"><h3>站点</h3><label>标题<input id="cmsSiteTitle" /></label><label>副标题<input id="cmsSiteSubtitle" /></label><label>网站描述<textarea id="cmsSiteDescription"></textarea></label></section><section class="studio4a-settings-section"><h3>个人资料</h3><label>显示名称<input id="cmsProfileName" /></label><label>简介<textarea id="cmsProfileBio"></textarea></label><label>头像路径<div class="studio4a-inline-field"><input id="cmsProfileAvatar" /><button id="cmsPickAvatar" class="btn" type="button">选择头像</button></div></label><div id="cmsAvatarPreview" class="studio4a-avatar-preview"></div><label>GitHub 地址<input id="cmsProfileGithub" inputmode="url" /></label><label>邮箱<input id="cmsProfileEmail" type="email" /></label></section><section class="studio4a-settings-section"><h3>公告</h3><label class="studio4a-check"><input id="cmsAnnouncementVisible" type="checkbox" />显示公告</label><label>公告标题<input id="cmsAnnouncementTitle" /></label><label>公告正文<textarea id="cmsAnnouncementContent"></textarea></label><label>按钮文字<input id="cmsAnnouncementButtonText" /></label><label>按钮链接<input id="cmsAnnouncementButtonUrl" inputmode="url" /></label></section></div>
 						</section>
-						<section class="studio4a-module hidden" data-studio-module-panel="media"><div class="studio4a-placeholder"><h2>媒体</h2><p>图片库已在文章工作区可用；独立媒体管理将在后续阶段加入。</p></div></section>
+						<section class="studio4a-module hidden" data-studio-module-panel="media">
+							<header class="studio4a-module-header">
+								<div><h2>媒体</h2><p>这里只显示可部署的文章图片、音频和视频。上传、删除与插入文章会在后续阶段加入。</p></div>
+								<button id="mediaRefresh" class="btn" type="button">刷新媒体库</button>
+							</header>
+							<div class="studio-media-toolbar">
+								<div class="studio-media-filters" role="group" aria-label="媒体类型筛选">
+									<button class="btn small active" type="button" data-media-kind="all">全部</button>
+									<button class="btn small" type="button" data-media-kind="image">图片</button>
+									<button class="btn small" type="button" data-media-kind="audio">音频</button>
+									<button class="btn small" type="button" data-media-kind="video">视频</button>
+								</div>
+								<input id="mediaSearch" type="search" placeholder="搜索文件名" autocomplete="off" />
+							</div>
+							<p id="mediaStatus" class="studio-media-status" role="status">进入媒体模块后读取媒体库。</p>
+							<div class="studio-media-workspace">
+								<div id="mediaList" class="studio-media-list" aria-live="polite"></div>
+								<aside id="mediaPreview" class="studio-media-preview" aria-live="polite">
+									<p>选择一个媒体文件即可预览并复制公开路径。</p>
+								</aside>
+							</div>
+							<button id="mediaRetry" class="btn hidden" type="button">重新加载</button>
+						</section>
 						<section class="studio4a-module hidden" data-studio-module-panel="albums"><div class="studio4a-placeholder"><h2>相册</h2><p>相册管理将在后续阶段加入。</p></div></section>
 						<section class="studio4a-module hidden" data-studio-module-panel="comments"><div class="studio4a-placeholder"><h2>评论与统计</h2><p>评论后端与真实统计将在后续阶段接入。</p></div></section>
 						<section class="studio4a-module hidden" data-studio-module-panel="posts"><div id="studio4a-posts-mount"></div></section>
