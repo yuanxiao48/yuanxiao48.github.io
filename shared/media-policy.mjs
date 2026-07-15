@@ -24,7 +24,7 @@ export const MEDIA_POLICIES = Object.freeze({
 		directory: Object.freeze(["video"]),
 		publicPrefix: "/assets/video/",
 		extensions: Object.freeze([".mp4", ".webm", ".mov"]),
-		maxBytes: 90 * 1024 * 1024,
+		maxBytes: 50 * 1024 * 1024,
 	}),
 });
 

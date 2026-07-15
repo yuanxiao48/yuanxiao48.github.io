@@ -3,6 +3,7 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="studio-session-token" content="__STUDIO_SESSION_TOKEN__" />
 		<title>博客操作台</title>
 		<link rel="stylesheet" href="./studio-editor.css" />
 		<link rel="stylesheet" href="./studio-cms.css" />
@@ -578,7 +579,19 @@
 								<div><h2>媒体</h2><p>这里只显示可部署的文章图片、音频和视频。上传、删除与插入文章会在后续阶段加入。</p></div>
 								<button id="mediaRefresh" class="btn" type="button">刷新媒体库</button>
 							</header>
-							<div class="studio-media-toolbar">
+							<div class="studio-media-view-tabs" role="tablist" aria-label="媒体视图">
+								<button id="mediaLibraryTab" class="btn small active" type="button" role="tab" aria-selected="true">媒体库</button>
+								<button id="mediaTrashTab" class="btn small" type="button" role="tab" aria-selected="false">媒体回收站</button>
+							</div>
+							<div id="mediaUploadPanel" class="studio-media-upload">
+								<label>上传类型 <select id="mediaUploadKind"><option value="image">图片 (20 MB)</option><option value="audio">音频 (50 MB)</option><option value="video">视频 (50 MB)</option></select></label>
+								<input id="mediaUploadInput" type="file" multiple />
+								<button id="mediaUploadStart" class="btn primary" type="button">开始上传</button>
+								<button id="mediaUploadCancel" class="btn hidden" type="button">取消当前上传</button>
+								<p id="mediaUploadStatus" class="studio-media-upload-status" role="status">图片、音频和视频会保存为可部署的站内路径。</p>
+								<p id="mediaVideoNotice" class="studio-media-video-notice hidden">较大的视频会显著增加 Git 仓库体积和 GitHub Pages 部署时间，建议改用外部视频平台。</p>
+							</div>
+							<div id="mediaLibraryControls" class="studio-media-toolbar">
 								<div class="studio-media-filters" role="group" aria-label="媒体类型筛选">
 									<button class="btn small active" type="button" data-media-kind="all">全部</button>
 									<button class="btn small" type="button" data-media-kind="image">图片</button>

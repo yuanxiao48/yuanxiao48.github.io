@@ -1,20 +1,25 @@
 import { createServer } from "node:http";
+import Busboy from "busboy";
+import { createReadStream, createWriteStream } from "node:fs";
 import {
 	access,
 	copyFile,
 	lstat,
 	mkdir,
+	open,
 	readFile,
 	readdir,
 	realpath,
 	rename,
 	rm,
 	stat,
+	unlink,
 	writeFile,
 } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { pipeline } from "node:stream/promises";
 import { createMarkdownProcessor } from "@astrojs/markdown-remark";
 import sanitizeHtml from "sanitize-html";
 import {
@@ -36,6 +41,8 @@ const publicImagesRoot = path.join(root, "public", "assets", "images");
 const publicAssetsRoot = path.join(root, "public", "assets");
 const publicPostImagesRoot = path.join(publicImagesRoot, "posts");
 const trashPostsRoot = path.join(root, ".studio-trash", "posts");
+const trashMediaRoot = path.join(root, ".studio-trash", "media");
+const mediaTempRoot = path.join(root, ".studio-tmp", "media");
 const uiPath = path.join(root, "studio-ui.html");
 const editorScriptPath = path.join(root, "studio-editor.js");
 const editorStylesPath = path.join(root, "studio-editor.css");
@@ -52,6 +59,9 @@ const studioAssets = new Map([
 const port = Number(process.env.STUDIO_PORT || 4322);
 const MAX_PREVIEW_BODY_BYTES = 256 * 1024;
 const MAX_CONTENT_BODY_BYTES = 512 * 1024;
+const MEDIA_UPLOAD_MULTIPART_OVERHEAD = 256 * 1024;
+const MEDIA_TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const STUDIO_SESSION_TOKEN = randomUUID();
 
 let previewMarkdownRendererPromise;
 
@@ -254,9 +264,11 @@ function stringValue(value, fallback = "") {
 }
 
 class StudioError extends Error {
-	constructor(message, status = 400) {
+	constructor(message, status = 400, code = "STUDIO_ERROR", details = undefined) {
 		super(message);
 		this.status = status;
+		this.code = code;
+		this.details = details;
 	}
 }
 
@@ -974,12 +986,82 @@ async function resolvePreviewAsset(urlPath) {
 	}
 	const info = await lstat(fullPath).catch(() => null);
 	if (!info?.isFile() || info.isSymbolicLink()) throw new StudioError("预览图片不存在", 404);
+	await assertNoSymlinksWithin(publicAssetsRoot, fullPath);
 	return { fullPath, ext };
 }
 
 function isInsidePath(base, candidate) {
 	const relative = path.relative(base, candidate);
 	return relative && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function isWithinPath(base, candidate) {
+	const relative = path.relative(base, candidate);
+	return !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+async function assertNoSymlinksWithin(base, candidate, includeCandidate = true) {
+	const baseInfo = await lstat(base).catch(() => null);
+	if (!baseInfo?.isDirectory() || baseInfo.isSymbolicLink()) {
+		throw new StudioError("Approved root is unavailable", 500, "MEDIA_ROOT_UNAVAILABLE");
+	}
+	const resolvedBase = await realpath(base);
+	const target = path.resolve(candidate);
+	if (!isWithinPath(path.resolve(base), target)) {
+		throw new StudioError("Path escapes its approved directory", 400, "MEDIA_PATH_INVALID");
+	}
+	const relative = path.relative(path.resolve(base), target);
+	const parts = relative ? relative.split(path.sep) : [];
+	const checked = includeCandidate ? parts : parts.slice(0, -1);
+	let current = path.resolve(base);
+	for (const part of checked) {
+		if (!part || part === "." || part === ".." || part.startsWith(".")) {
+			throw new StudioError("Path contains an unsafe segment", 400, "MEDIA_PATH_INVALID");
+		}
+		current = path.join(current, part);
+		const info = await lstat(current).catch(() => null);
+		if (!info) throw new StudioError("Approved path does not exist", 404, "MEDIA_NOT_FOUND");
+		if (info.isSymbolicLink()) throw new StudioError("Symbolic links are not allowed", 400, "MEDIA_SYMLINK_BLOCKED");
+		const resolvedCurrent = await realpath(current);
+		if (!isWithinPath(resolvedBase, resolvedCurrent)) {
+			throw new StudioError("Path escapes its approved directory", 400, "MEDIA_PATH_INVALID");
+		}
+	}
+	return { resolvedBase, target };
+}
+
+async function ensureSafeDirectoryWithin(base, directory, { allowHidden = false } = {}) {
+	const basePath = path.resolve(base);
+	const target = path.resolve(directory);
+	if (!isWithinPath(basePath, target)) {
+		throw new StudioError("Directory escapes its approved root", 400, "MEDIA_PATH_INVALID");
+	}
+	const baseInfo = await lstat(basePath).catch(() => null);
+	if (!baseInfo?.isDirectory() || baseInfo.isSymbolicLink()) {
+		throw new StudioError("Approved root is unavailable", 500, "MEDIA_ROOT_UNAVAILABLE");
+	}
+	const resolvedBase = await realpath(basePath);
+	let current = basePath;
+	const relative = path.relative(basePath, target);
+	for (const part of relative ? relative.split(path.sep) : []) {
+		if (!part || part === "." || part === ".." || (!allowHidden && part.startsWith("."))) {
+			throw new StudioError("Directory contains an unsafe segment", 400, "MEDIA_PATH_INVALID");
+		}
+		current = path.join(current, part);
+		let info = await lstat(current).catch(() => null);
+		if (!info) {
+			await mkdir(current);
+			info = await lstat(current);
+		}
+		if (!info.isDirectory() || info.isSymbolicLink()) {
+			throw new StudioError("Directory is not safe", 400, "MEDIA_SYMLINK_BLOCKED");
+		}
+		const resolvedCurrent = await realpath(current);
+		if (!isWithinPath(resolvedBase, resolvedCurrent)) {
+			throw new StudioError("Directory escapes its approved root", 400, "MEDIA_PATH_INVALID");
+		}
+	}
+	return { directory: target, resolvedBase };
 }
 
 function hasHiddenPathPart(relativePath) {
@@ -1010,7 +1092,16 @@ async function getSafeMediaRoot(kind) {
 	if (!isInsidePath(resolvedPublicAssets, resolvedMediaRoot)) {
 		throw new StudioError("Media directory escapes public assets", 500);
 	}
+	await assertNoSymlinksWithin(publicAssetsRoot, mediaRoot);
 	return { policy, mediaRoot, resolvedMediaRoot };
+}
+
+async function getSafeWritableMediaRoot(kind) {
+	const policy = getMediaPolicy(kind);
+	if (!policy) throw new StudioError("Unsupported media kind", 400, "MEDIA_KIND_INVALID");
+	const mediaRoot = path.resolve(publicAssetsRoot, ...policy.directory);
+	const safe = await ensureSafeDirectoryWithin(publicAssetsRoot, mediaRoot);
+	return { policy, mediaRoot: safe.directory, resolvedMediaRoot: await realpath(safe.directory) };
 }
 
 async function getSafeMediaFile(mediaPath) {
@@ -1030,6 +1121,7 @@ async function getSafeMediaFile(mediaPath) {
 		throw new StudioError("Media file cannot be read", 500);
 	}
 	if (!info.isFile() || info.isSymbolicLink()) return { ...parsed, exists: false };
+	await assertNoSymlinksWithin(rootInfo.mediaRoot, file);
 	const resolvedFile = await realpath(file);
 	if (!isInsidePath(rootInfo.resolvedMediaRoot, resolvedFile)) {
 		throw new StudioError("Media file escapes its approved directory", 400);
@@ -1161,6 +1253,419 @@ async function findMediaReferences(mediaPath) {
 		}
 	}
 	return { ok: true, path: media.publicPath, exists: true, references };
+}
+
+const MEDIA_MIME_TYPES = Object.freeze({
+	".jpg": new Set(["image/jpeg"]),
+	".jpeg": new Set(["image/jpeg"]),
+	".png": new Set(["image/png"]),
+	".webp": new Set(["image/webp"]),
+	".avif": new Set(["image/avif"]),
+	".gif": new Set(["image/gif"]),
+	".mp3": new Set(["audio/mpeg", "audio/mp3"]),
+	".m4a": new Set(["audio/mp4", "audio/x-m4a"]),
+	".aac": new Set(["audio/aac", "audio/x-aac"]),
+	".wav": new Set(["audio/wav", "audio/x-wav", "audio/wave"]),
+	".ogg": new Set(["audio/ogg", "application/ogg"]),
+	".flac": new Set(["audio/flac", "audio/x-flac"]),
+	".mp4": new Set(["video/mp4"]),
+	".webm": new Set(["video/webm"]),
+	".mov": new Set(["video/quicktime"]),
+});
+
+function normalizeUploadFilename(value, policy) {
+	const raw = typeof value === "string" ? value.trim() : "";
+	if (!raw || raw.includes("\\") || raw.includes("/") || raw.includes("\0") || /^(?:[a-z]:|file:|javascript:)/i.test(raw)) {
+		throw new StudioError("Upload filename is invalid", 400, "MEDIA_FILENAME_INVALID");
+	}
+	const extension = path.extname(raw).toLowerCase();
+	if (!policy.extensions.includes(extension)) {
+		throw new StudioError("File extension is not allowed for this media type", 415, "MEDIA_EXTENSION_INVALID");
+	}
+	const stem = raw.slice(0, -extension.length);
+	if (!stem || stem.startsWith(".") || stem.includes(".") || stem === "." || stem === "..") {
+		throw new StudioError("Upload filename is unsafe", 400, "MEDIA_FILENAME_INVALID");
+	}
+	const cleaned = stem
+		.normalize("NFKC")
+		.replace(/\s+/g, "-")
+		.replace(/[^\p{L}\p{N}_-]+/gu, "")
+		.replace(/-+/g, "-")
+		.replace(/^[-_]+|[-_]+$/g, "")
+		.slice(0, 80);
+	if (!cleaned || cleaned.startsWith(".")) {
+		throw new StudioError("Upload filename has no safe characters", 400, "MEDIA_FILENAME_INVALID");
+	}
+	return `${cleaned}${extension}`;
+}
+
+function mimeMatchesExtension(mimeType, extension) {
+	const mime = String(mimeType || "").trim().toLowerCase();
+	if (!mime || mime === "application/octet-stream") return true;
+	return MEDIA_MIME_TYPES[extension]?.has(mime) ?? false;
+}
+
+function startsWithBytes(buffer, bytes) {
+	return buffer.length >= bytes.length && bytes.every((value, index) => buffer[index] === value);
+}
+
+function hasIsoBmffBrand(buffer, extension) {
+	if (buffer.length < 16 || buffer.toString("ascii", 4, 8) !== "ftyp") return false;
+	const brands = new Set();
+	for (let offset = 8; offset + 4 <= buffer.length; offset += 4) {
+		brands.add(buffer.toString("ascii", offset, offset + 4));
+	}
+	if (extension === ".avif") return brands.has("avif") || brands.has("avis");
+	if (extension === ".mov") return brands.has("qt  ");
+	if (extension === ".m4a") return brands.has("M4A ") || brands.has("M4B ");
+	if (extension === ".mp4") {
+		return [...brands].some((brand) => /^(?:isom|iso[2-9]|mp4[12]|avc1|dash|MSNV|3gp[456])$/.test(brand));
+	}
+	return false;
+}
+
+function hasValidMediaSignature(buffer, extension) {
+	switch (extension) {
+		case ".jpg":
+		case ".jpeg": return startsWithBytes(buffer, [0xff, 0xd8, 0xff]);
+		case ".png": return startsWithBytes(buffer, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		case ".gif": return buffer.toString("ascii", 0, 6) === "GIF87a" || buffer.toString("ascii", 0, 6) === "GIF89a";
+		case ".webp": return buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP";
+		case ".avif":
+		case ".m4a":
+		case ".mp4":
+		case ".mov": return hasIsoBmffBrand(buffer, extension);
+		case ".mp3": return buffer.toString("ascii", 0, 3) === "ID3" || (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0);
+		case ".aac": return buffer[0] === 0xff && (buffer[1] & 0xf6) === 0xf0;
+		case ".wav": return buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WAVE";
+		case ".ogg": return buffer.toString("ascii", 0, 4) === "OggS";
+		case ".flac": return buffer.toString("ascii", 0, 4) === "fLaC";
+		case ".webm": return startsWithBytes(buffer, [0x1a, 0x45, 0xdf, 0xa3]) && buffer.toString("ascii").includes("webm");
+		default: return false;
+	}
+}
+
+async function validateMediaFile(file, kind, extension, mimeType) {
+	if (!mimeMatchesExtension(mimeType, extension)) {
+		throw new StudioError("Declared MIME type does not match the file extension", 415, "MEDIA_MIME_INVALID");
+	}
+	const handle = await open(file, "r");
+	const header = Buffer.alloc(8192);
+	let bytesRead = 0;
+	try {
+		({ bytesRead } = await handle.read(header, 0, header.length, 0));
+	} finally {
+		await handle.close();
+	}
+	const bytes = header.subarray(0, bytesRead);
+	if (!hasValidMediaSignature(bytes, extension)) {
+		throw new StudioError("File header does not match the selected media type", 415, "MEDIA_SIGNATURE_INVALID");
+	}
+	return { kind, extension };
+}
+
+async function hashFile(file) {
+	const hash = createHash("sha256");
+	for await (const chunk of createReadStream(file)) hash.update(chunk);
+	return hash.digest("hex");
+}
+
+async function safeRemove(file) {
+	await rm(file, { force: true, recursive: false }).catch(() => {});
+}
+
+async function cleanupStaleMediaTemps() {
+	const tempRoot = await ensureSafeDirectoryWithin(root, mediaTempRoot, { allowHidden: true });
+	const now = Date.now();
+	for (const entry of await readdir(tempRoot.directory, { withFileTypes: true })) {
+		if (!entry.isFile() || entry.isSymbolicLink() || !entry.name.endsWith(".part")) continue;
+		const file = path.join(tempRoot.directory, entry.name);
+		const info = await stat(file).catch(() => null);
+		if (info && now - info.mtimeMs > MEDIA_TEMP_MAX_AGE_MS) await safeRemove(file);
+	}
+}
+
+function requiredStudioOrigin() {
+	return `http://127.0.0.1:${port}`;
+}
+
+function assertStudioWriteRequest(req) {
+	const expectedHost = `127.0.0.1:${port}`;
+	if (String(req.headers.host || "").toLowerCase() !== expectedHost) {
+		throw new StudioError("Invalid Studio host", 403, "STUDIO_HOST_INVALID");
+	}
+	if (String(req.headers.origin || "") !== requiredStudioOrigin()) {
+		throw new StudioError("Studio write requests must originate from this local Studio", 403, "STUDIO_ORIGIN_INVALID");
+	}
+	if (String(req.headers["x-studio-session"] || "") !== STUDIO_SESSION_TOKEN) {
+		throw new StudioError("Studio session verification failed", 403, "STUDIO_SESSION_INVALID");
+	}
+}
+
+async function nextAvailableMediaFilename(directory, filename) {
+	const extension = path.extname(filename);
+	const stem = filename.slice(0, -extension.length);
+	for (let index = 1; index < 10000; index += 1) {
+		const candidate = index === 1 ? filename : `${stem}-${index}${extension}`;
+		if (!(await pathExists(path.join(directory, candidate)))) return candidate;
+	}
+	throw new StudioError("Could not allocate a non-conflicting media filename", 409, "MEDIA_NAME_CONFLICT");
+}
+
+async function receiveMediaUpload(req, kind) {
+	const policy = getMediaPolicy(kind);
+	if (!policy) throw new StudioError("Unsupported media kind", 400, "MEDIA_KIND_INVALID");
+	const declaredLength = Number(req.headers["content-length"] || 0);
+	if (Number.isFinite(declaredLength) && declaredLength > policy.maxBytes + MEDIA_UPLOAD_MULTIPART_OVERHEAD) {
+		req.resume();
+		throw new StudioError("Upload exceeds the allowed size", 413, "MEDIA_TOO_LARGE");
+	}
+	if (!String(req.headers["content-type"] || "").toLowerCase().startsWith("multipart/form-data")) {
+		throw new StudioError("Media upload must use multipart/form-data", 415, "MEDIA_MULTIPART_REQUIRED");
+	}
+	const tempRoot = await ensureSafeDirectoryWithin(root, mediaTempRoot, { allowHidden: true });
+	let tempFile = "";
+	let received = null;
+	let tooLarge = false;
+	let parserError = null;
+	let aborted = false;
+	let writePromise = Promise.resolve();
+	const busboy = Busboy({
+		headers: req.headers,
+		limits: { files: 1, fileSize: policy.maxBytes, fields: 8, fieldSize: 4096, parts: 12 },
+	});
+	const complete = new Promise((resolve, reject) => {
+		busboy.on("file", (fieldName, stream, info) => {
+			if (fieldName !== "file" || received) {
+				stream.resume();
+				parserError ||= new StudioError("Upload must include exactly one file field", 400, "MEDIA_FILE_FIELD_INVALID");
+				return;
+			}
+			tempFile = path.join(tempRoot.directory, `${randomUUID()}.part`);
+			received = { filename: info.filename, mimeType: info.mimeType };
+			stream.on("limit", () => { tooLarge = true; });
+			writePromise = pipeline(stream, createWriteStream(tempFile, { flags: "wx" }));
+			writePromise.catch((error) => { parserError ||= error; });
+		});
+		busboy.on("filesLimit", () => { parserError ||= new StudioError("Only one file may be uploaded at a time", 400, "MEDIA_FILE_COUNT_INVALID"); });
+		busboy.on("partsLimit", () => { parserError ||= new StudioError("Upload has too many multipart parts", 400, "MEDIA_MULTIPART_INVALID"); });
+		busboy.on("error", (error) => reject(error));
+		busboy.on("finish", resolve);
+		req.on("aborted", () => { aborted = true; reject(new StudioError("Upload was cancelled", 499, "MEDIA_UPLOAD_ABORTED")); });
+	});
+	try {
+		req.pipe(busboy);
+		await complete;
+		await writePromise;
+		if (aborted) throw new StudioError("Upload was cancelled", 499, "MEDIA_UPLOAD_ABORTED");
+		if (parserError) throw parserError;
+		if (tooLarge) throw new StudioError("Upload exceeds the allowed size", 413, "MEDIA_TOO_LARGE");
+		if (!received || !tempFile) throw new StudioError("No media file was received", 400, "MEDIA_FILE_REQUIRED");
+		const info = await stat(tempFile);
+		if (info.size > policy.maxBytes) throw new StudioError("Upload exceeds the allowed size", 413, "MEDIA_TOO_LARGE");
+		const filename = normalizeUploadFilename(received.filename, policy);
+		const extension = path.extname(filename).toLowerCase();
+		await validateMediaFile(tempFile, kind, extension, received.mimeType);
+		const destinationRoot = await getSafeWritableMediaRoot(kind);
+		const storedFilename = await nextAvailableMediaFilename(destinationRoot.mediaRoot, filename);
+		const destination = path.join(destinationRoot.mediaRoot, storedFilename);
+		await rename(tempFile, destination);
+		tempFile = "";
+		return {
+			ok: true,
+			item: {
+				kind,
+				name: storedFilename,
+				publicPath: `${policy.publicPrefix}${storedFilename}`,
+				relativePath: storedFilename,
+				size: info.size,
+				modifiedAt: (await stat(destination)).mtime.toISOString(),
+			},
+		};
+	} finally {
+		if (tempFile) await safeRemove(tempFile);
+	}
+}
+
+function safeTrashId(value) {
+	return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value) ? value : "";
+}
+
+function validateMediaTrashManifest(value) {
+	if (!isRecord(value) || value.version !== 1 || !safeTrashId(value.id)) {
+		throw new StudioError("Media trash manifest is invalid", 422, "MEDIA_TRASH_MANIFEST_INVALID");
+	}
+	const parsed = normalizeMediaPublicPath(value.originalPublicPath);
+	const policy = parsed && getMediaPolicy(value.kind);
+	if (!parsed || !policy || parsed.kind !== value.kind || typeof value.originalFilename !== "string" || typeof value.storedFilename !== "string") {
+		throw new StudioError("Media trash manifest is invalid", 422, "MEDIA_TRASH_MANIFEST_INVALID");
+	}
+	const safeName = normalizeUploadFilename(value.storedFilename, policy);
+	if (safeName !== value.storedFilename || path.basename(parsed.relativePath) !== value.originalFilename) {
+		throw new StudioError("Media trash manifest is invalid", 422, "MEDIA_TRASH_MANIFEST_INVALID");
+	}
+	if (!Number.isSafeInteger(value.size) || value.size < 0 || !/^[a-f0-9]{64}$/i.test(String(value.sha256 || ""))) {
+		throw new StudioError("Media trash manifest is invalid", 422, "MEDIA_TRASH_MANIFEST_INVALID");
+	}
+	return { ...value, parsed, policy };
+}
+
+async function readMediaTrashItem(id) {
+	const safeId = safeTrashId(id);
+	if (!safeId) throw new StudioError("Media trash item is invalid", 400, "MEDIA_TRASH_ID_INVALID");
+	const trashRoot = await ensureSafeDirectoryWithin(root, trashMediaRoot, { allowHidden: true });
+	const itemDir = path.join(trashRoot.directory, safeId);
+	const itemInfo = await lstat(itemDir).catch(() => null);
+	if (!itemInfo?.isDirectory() || itemInfo.isSymbolicLink()) {
+		throw new StudioError("Media trash item was not found", 404, "MEDIA_TRASH_NOT_FOUND");
+	}
+	await assertNoSymlinksWithin(trashRoot.directory, itemDir);
+	const manifestPath = path.join(itemDir, "manifest.json");
+	const manifestInfo = await lstat(manifestPath).catch(() => null);
+	if (!manifestInfo?.isFile() || manifestInfo.isSymbolicLink()) {
+		throw new StudioError("Media trash manifest is invalid", 422, "MEDIA_TRASH_MANIFEST_INVALID");
+	}
+	const manifest = validateMediaTrashManifest(JSON.parse(await readFile(manifestPath, "utf8")));
+	const mediaFile = path.join(itemDir, manifest.storedFilename);
+	const mediaInfo = await lstat(mediaFile).catch(() => null);
+	if (!mediaInfo?.isFile() || mediaInfo.isSymbolicLink()) {
+		throw new StudioError("Media trash file is missing", 422, "MEDIA_TRASH_FILE_MISSING");
+	}
+	await assertNoSymlinksWithin(itemDir, mediaFile);
+	return { id: safeId, itemDir, manifestPath, manifest, mediaFile, mediaInfo };
+}
+
+function mediaTrashSummary(item) {
+	return {
+		id: item.id,
+		kind: item.manifest.kind,
+		name: item.manifest.originalFilename,
+		originalPublicPath: item.manifest.originalPublicPath,
+		deletedAt: item.manifest.deletedAt,
+		size: item.manifest.size,
+		references: Array.isArray(item.manifest.detectedReferences) ? item.manifest.detectedReferences : [],
+	};
+}
+
+async function listMediaTrash() {
+	const trashRoot = await ensureSafeDirectoryWithin(root, trashMediaRoot, { allowHidden: true });
+	const items = [];
+	const errors = [];
+	for (const entry of await readdir(trashRoot.directory, { withFileTypes: true })) {
+		if (!entry.isDirectory() || entry.isSymbolicLink() || !safeTrashId(entry.name)) continue;
+		try {
+			items.push(mediaTrashSummary(await readMediaTrashItem(entry.name)));
+		} catch (error) {
+			errors.push({ id: entry.name, error: "Trash item could not be read safely" });
+		}
+	}
+	items.sort((a, b) => String(b.deletedAt).localeCompare(String(a.deletedAt)) || a.id.localeCompare(b.id));
+	return { ok: true, items, errors };
+}
+
+async function moveMediaToTrash(input) {
+	const media = await getSafeMediaFile(input?.path);
+	if (!media.exists) throw new StudioError("Media file was not found", 404, "MEDIA_NOT_FOUND");
+	const referencesPayload = await findMediaReferences(media.publicPath);
+	const references = referencesPayload.references || [];
+	if (references.length && input?.confirmReferenced !== true) {
+		throw new StudioError(
+			"This media file is still referenced and needs a second confirmation before moving to trash",
+			409,
+			"MEDIA_REFERENCED",
+			{ path: media.publicPath, references },
+		);
+	}
+	const trashRoot = await ensureSafeDirectoryWithin(root, trashMediaRoot, { allowHidden: true });
+	const id = randomUUID();
+	const stagingDir = path.join(trashRoot.directory, `staging-${id}`);
+	const finalDir = path.join(trashRoot.directory, id);
+	await mkdir(stagingDir, { recursive: false });
+	let moved = false;
+	try {
+		const sha256 = await hashFile(media.file);
+		const manifest = {
+			version: 1,
+			id,
+			originalPublicPath: media.publicPath,
+			kind: media.kind,
+			originalFilename: path.basename(media.relativePath),
+			storedFilename: path.basename(media.relativePath),
+			deletedAt: new Date().toISOString(),
+			size: media.info.size,
+			sha256,
+			detectedReferences: references,
+		};
+		validateMediaTrashManifest(manifest);
+		await atomicWriteFile(path.join(stagingDir, "manifest.pending.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+		const stagedFile = path.join(stagingDir, manifest.storedFilename);
+		await rename(media.file, stagedFile);
+		moved = true;
+		await atomicWriteFile(path.join(stagingDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+		await safeRemove(path.join(stagingDir, "manifest.pending.json"));
+		await rename(stagingDir, finalDir);
+		return { ok: true, item: mediaTrashSummary({ id, manifest }) };
+	} catch (error) {
+		if (moved) {
+			const stagedFile = path.join(stagingDir, path.basename(media.relativePath));
+			if (await pathExists(stagedFile)) await rename(stagedFile, media.file).catch(() => {});
+		}
+		await rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+		throw error;
+	}
+}
+
+function restoreFilenameFromInput(value, policy, originalFilename) {
+	if (value === undefined || value === null || value === "") return originalFilename;
+	const filename = normalizeUploadFilename(String(value), policy);
+	if (path.extname(filename).toLowerCase() !== path.extname(originalFilename).toLowerCase()) {
+		throw new StudioError("Restored filename must keep the original extension", 400, "MEDIA_RESTORE_NAME_INVALID");
+	}
+	return filename;
+}
+
+async function restoreMediaFromTrash(input) {
+	const item = await readMediaTrashItem(input?.id);
+	const manifest = item.manifest;
+	const actualHash = await hashFile(item.mediaFile);
+	if (actualHash !== manifest.sha256) {
+		throw new StudioError("Media trash file failed integrity verification", 422, "MEDIA_TRASH_HASH_MISMATCH");
+	}
+	await validateMediaFile(item.mediaFile, manifest.kind, path.extname(manifest.storedFilename).toLowerCase(), "");
+	const destinationRoot = await getSafeWritableMediaRoot(manifest.kind);
+	const filename = restoreFilenameFromInput(input?.filename, manifest.policy, manifest.originalFilename);
+	const relativeDirectory = path.dirname(manifest.parsed.relativePath);
+	const destinationDirectory = relativeDirectory === "."
+		? destinationRoot.mediaRoot
+		: (await ensureSafeDirectoryWithin(destinationRoot.mediaRoot, path.join(destinationRoot.mediaRoot, relativeDirectory))).directory;
+	const destination = path.join(destinationDirectory, filename);
+	if (await pathExists(destination)) {
+		const suggested = await nextAvailableMediaFilename(destinationRoot.mediaRoot, filename);
+		throw new StudioError(
+			"A media file already exists at the original location",
+			409,
+			"MEDIA_RESTORE_CONFLICT",
+			{ suggestedFilename: suggested, originalFilename: filename },
+		);
+	}
+	await rename(item.mediaFile, destination);
+	try {
+		await rm(item.itemDir, { recursive: true, force: true });
+	} catch (error) {
+		await rename(destination, item.mediaFile).catch(() => {});
+		throw new StudioError("Media was not restored because trash cleanup failed", 500, "MEDIA_RESTORE_FAILED");
+	}
+	return {
+		ok: true,
+		item: {
+			kind: manifest.kind,
+			name: filename,
+			publicPath: `${manifest.policy.publicPrefix}${relativeDirectory === "." ? "" : `${relativeDirectory.replace(/\\/g, "/")}/`}${filename}`,
+			relativePath: relativeDirectory === "." ? filename : `${relativeDirectory.replace(/\\/g, "/")}/${filename}`,
+			size: manifest.size,
+			modifiedAt: (await stat(destination)).mtime.toISOString(),
+		},
+	};
 }
 
 function slugify(value) {
@@ -1991,7 +2496,8 @@ const server = createServer(async (req, res) => {
 	try {
 		const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
 		if (req.method === "GET" && url.pathname === "/") {
-			send(res, 200, await readFile(uiPath, "utf8"), {
+			const html = (await readFile(uiPath, "utf8")).replace("__STUDIO_SESSION_TOKEN__", STUDIO_SESSION_TOKEN);
+			send(res, 200, html, {
 				"content-type": "text/html; charset=utf-8",
 			});
 			return;
@@ -2067,6 +2573,27 @@ const server = createServer(async (req, res) => {
 			send(res, 200, await findMediaReferences(url.searchParams.get("path")));
 			return;
 		}
+		if (req.method === "POST" && url.pathname === "/api/media") {
+			assertStudioWriteRequest(req);
+			const kind = normalizeMediaKind(url.searchParams.get("kind"), "");
+			if (!kind || kind === "all") throw new StudioError("Media kind must be image, audio, or video", 400, "MEDIA_KIND_INVALID");
+			send(res, 201, await receiveMediaUpload(req, kind));
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/media/trash") {
+			send(res, 200, await listMediaTrash());
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/media/trash") {
+			assertStudioWriteRequest(req);
+			send(res, 200, await moveMediaToTrash(await readContentBody(req)));
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/media/restore") {
+			assertStudioWriteRequest(req);
+			send(res, 200, await restoreMediaFromTrash(await readContentBody(req)));
+			return;
+		}
 		if (req.method === "GET" && url.pathname === "/api/images") {
 			send(res, 200, await listImages());
 			return;
@@ -2126,15 +2653,23 @@ const server = createServer(async (req, res) => {
 			send(res, 200, await safeDeletePost(url.searchParams.get("path")));
 			return;
 		}
-		send(res, 404, { error: "Not found" });
+		send(res, 404, { ok: false, code: "NOT_FOUND", error: "Not found" });
 	} catch (error) {
-		send(res, error instanceof StudioError ? error.status : 500, {
-			error: error.message || "Studio error",
+		const known = error instanceof StudioError;
+		send(res, known ? error.status : 500, {
+			ok: false,
+			code: known ? error.code : "STUDIO_INTERNAL_ERROR",
+			error: known ? error.message : "Studio request failed safely",
+			...(known && error.details ? { details: error.details } : {}),
 		});
 	}
 });
 
-server.listen(port, "127.0.0.1", () => {
-	console.log(`Blog Studio: http://127.0.0.1:${port}/`);
-	console.log("Keep this window open while editing.");
-});
+cleanupStaleMediaTemps()
+	.catch((error) => console.warn("Studio media temp cleanup skipped:", error.message))
+	.finally(() => {
+		server.listen(port, "127.0.0.1", () => {
+			console.log(`Blog Studio: http://127.0.0.1:${port}/`);
+			console.log("Keep this window open while editing.");
+		});
+	});

@@ -5,6 +5,14 @@
 .studio-media-status { min-height: 22px; margin: 0 0 11px; color: var(--muted); font-size: 13px; }
 .studio-media-status[data-state="error"] { color: var(--danger); }
 .studio-media-status[data-state="ready"] { color: var(--accent); }
+.studio-media-view-tabs { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
+.studio-media-upload { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(200px, 1fr) auto auto; align-items: end; gap: 9px 10px; padding: 11px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 82%, transparent); }
+.studio-media-upload label { display: grid; gap: 5px; font-size: 12px; color: var(--muted); }
+.studio-media-upload select, .studio-media-upload input[type="file"] { min-width: 0; }
+.studio-media-upload-status, .studio-media-video-notice { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.studio-media-upload-status[data-state="error"] { color: var(--danger); }
+.studio-media-upload-status[data-state="ready"] { color: var(--accent); }
+.studio-media-video-notice { color: var(--accent-2); }
 .studio-media-workspace { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(300px, .72fr); gap: 14px; min-height: min(620px, calc(100vh - 235px)); }
 .studio-media-list, .studio-media-preview { min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 89%, transparent); box-shadow: 0 10px 24px rgba(0,0,0,.11); }
 .studio-media-list { display: grid; align-content: start; gap: 8px; overflow: auto; padding: 10px; }
@@ -20,6 +28,7 @@
 .studio-media-preview img, .studio-media-preview video, .studio-media-preview audio { width: 100%; max-width: 100%; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-3); }
 .studio-media-preview img { max-height: 360px; object-fit: contain; }
 .studio-media-preview code { display: block; overflow-wrap: anywhere; color: var(--accent); font-size: 11px; }
+.studio-media-preview .btn { justify-self: start; }
 .studio-media-empty { padding: 18px; color: var(--muted); text-align: center; }
 .studio-media-empty.error { color: var(--danger); }
 #mediaRetry { margin-top: 12px; }
@@ -30,4 +39,5 @@
 	.studio-media-workspace { grid-template-columns: 1fr; min-height: auto; }
 	.studio-media-list { max-height: 390px; }
 	.studio-media-preview { min-height: 240px; }
+	.studio-media-upload { grid-template-columns: 1fr; align-items: stretch; }
 }
