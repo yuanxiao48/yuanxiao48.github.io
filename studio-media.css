@@ -24,7 +24,8 @@
 .studio-media-kind { color: var(--accent) !important; }
 .studio-media-preview { display: grid; align-content: start; gap: 11px; overflow: auto; padding: 14px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .studio-media-preview h3 { color: var(--text); font-size: 16px; overflow-wrap: anywhere; }
-.studio-media-preview-meta, .studio-media-duration { margin: 0; }
+.studio-media-preview-meta, .studio-media-duration, .studio-media-video-compatibility { margin: 0; }
+.studio-media-video-compatibility { padding: 8px 9px; border: 1px solid color-mix(in srgb, var(--accent-2) 42%, var(--line)); border-radius: 7px; background: color-mix(in srgb, var(--accent-2) 8%, var(--panel-3)); color: var(--text); font-size: 12px; line-height: 1.5; }
 .studio-media-preview img, .studio-media-preview video, .studio-media-preview audio { width: 100%; max-width: 100%; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-3); }
 .studio-media-preview img { max-height: 360px; object-fit: contain; }
 .studio-media-preview code { display: block; overflow-wrap: anywhere; color: var(--accent); font-size: 11px; }

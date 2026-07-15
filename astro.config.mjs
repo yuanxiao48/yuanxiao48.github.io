@@ -31,6 +31,7 @@ import { GithubCardComponent } from "./src/plugins/rehype-component-github-card.
 import rehypeEmailProtection from "./src/plugins/rehype-email-protection.mjs";
 import rehypeExternalLinks from "./src/plugins/rehype-external-links.mjs";
 import rehypeFigure from "./src/plugins/rehype-figure.mjs";
+import rehypeMediaEmbeds from "./src/plugins/rehype-media-embeds.mjs";
 import { rehypeMermaid } from "./src/plugins/rehype-mermaid.mjs";
 import { rehypePlantuml } from "./src/plugins/rehype-plantuml.mjs";
 import { parseDirectiveNode } from "./src/plugins/remark-directive-rehype.js";
@@ -39,6 +40,7 @@ import { remarkImageGrid } from "./src/plugins/remark-image-grid.js";
 import { remarkMermaid } from "./src/plugins/remark-mermaid.js";
 import { remarkPlantuml } from "./src/plugins/remark-plantuml.js";
 import { remarkReadingTime } from "./src/plugins/remark-reading-time.mjs";
+import { remarkRawHtmlPolicy } from "./src/plugins/remark-raw-html-policy.mjs";
 
 if (process.env.NODE_ENV === "development") {
 	setMaxListeners(20);
@@ -217,6 +219,7 @@ export default defineConfig({
 				remarkDirective,
 				remarkSectionize,
 				parseDirectiveNode,
+				remarkRawHtmlPolicy,
 				remarkMermaid,
 				[remarkPlantuml, plantumlConfig],
 			],
@@ -260,6 +263,7 @@ export default defineConfig({
 						},
 					},
 				],
+				rehypeMediaEmbeds,
 			],
 		}),
 	},

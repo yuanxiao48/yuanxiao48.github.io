@@ -21,7 +21,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { pipeline } from "node:stream/promises";
 import { createMarkdownProcessor } from "@astrojs/markdown-remark";
+import remarkDirective from "remark-directive";
 import sanitizeHtml from "sanitize-html";
+import { parseDirectiveNode } from "./src/plugins/remark-directive-rehype.js";
+import rehypeMediaEmbeds from "./src/plugins/rehype-media-embeds.mjs";
+import { remarkRawHtmlPolicy } from "./src/plugins/remark-raw-html-policy.mjs";
 import {
 	getMediaPolicy,
 	MEDIA_KINDS,
@@ -29,6 +33,12 @@ import {
 	normalizeMediaPublicPath,
 	normalizeMediaSearch,
 } from "./shared/media-policy.mjs";
+import {
+	EXTERNAL_VIDEO_ALLOW,
+	EXTERNAL_VIDEO_REFERRER_POLICY,
+	normalizeEmbeddedMediaPath,
+	normalizeExternalVideoUrl,
+} from "./shared/media-embed-policy.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const settingsPath = path.join(root, "src", "config", "userSettings.json");
@@ -55,6 +65,8 @@ const studioAssets = new Map([
 	["/studio-shell.js", [path.join(root, "studio-shell.js"), "text/javascript; charset=utf-8"]],
 	["/studio-media-manager.js", [path.join(root, "studio-media-manager.js"), "text/javascript; charset=utf-8"]],
 	["/studio-media.css", [path.join(root, "studio-media.css"), "text/css; charset=utf-8"]],
+	["/studio-article-media-picker.js", [path.join(root, "studio-article-media-picker.js"), "text/javascript; charset=utf-8"]],
+	["/studio-article-media-picker.css", [path.join(root, "studio-article-media-picker.css"), "text/css; charset=utf-8"]],
 ]);
 const port = Number(process.env.STUDIO_PORT || 4322);
 const MAX_PREVIEW_BODY_BYTES = 256 * 1024;
@@ -822,16 +834,24 @@ function previewAssetRelative(value) {
 function previewImageSource(source) {
 	const value = String(source || "").trim();
 	if (!value) return "";
-	if (value.startsWith("/assets/")) {
-		const relative = previewAssetRelative(value.slice("/assets/".length));
-		return relative ? `/studio-assets/${relative}` : "";
+	const local = normalizeEmbeddedMediaPath(value, "image");
+	if (local) return `/studio-assets/${local.publicPath.slice("/assets/".length)}`;
+	try {
+		const url = new URL(value);
+		if (url.protocol === "https:" && !url.username && !url.password && !url.port) return url.href;
+	} catch {
+		return "";
 	}
-	if (/^https?:\/\//i.test(value)) return value;
 	return "";
 }
 
-function previewMediaSource(source) {
-	return previewImageSource(source);
+function previewMediaSource(source, expectedKinds) {
+	const local = normalizeEmbeddedMediaPath(source, expectedKinds);
+	return local ? `/studio-assets/${local.publicPath.slice("/assets/".length)}` : "";
+}
+
+function previewExternalVideoSource(source) {
+	return normalizeExternalVideoUrl(source)?.embedUrl || "";
 }
 
 function articleImagePath(value) {
@@ -868,83 +888,56 @@ function previewWarnings(markdown) {
 function previewSanitizer() {
 	return {
 		allowedTags: [
-			"a",
-			"audio",
-			"blockquote",
-			"br",
-			"code",
-			"del",
-			"em",
-			"h1",
-			"h2",
-			"h3",
-			"h4",
-			"h5",
-			"h6",
-			"hr",
-			"img",
-			"li",
-			"ol",
-			"p",
-			"pre",
-			"s",
-			"strong",
-			"table",
-			"tbody",
-			"td",
-			"th",
-			"thead",
-			"tr",
-			"ul",
-			"video",
-			"source",
+			"a", "audio", "blockquote", "br", "code", "del", "div", "em", "figcaption", "figure", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "iframe", "img", "li", "ol", "p", "pre", "s", "source", "strong", "table", "tbody", "td", "th", "thead", "track", "tr", "ul", "video",
 		],
 		allowedAttributes: {
 			a: ["href", "rel", "title"],
 			code: ["class"],
+			div: ["class", "data-pagefind-ignore"],
+			figure: ["class"],
 			img: ["src", "alt", "title", "width", "height", "loading"],
-			audio: ["src", "controls", "preload"],
-			video: ["src", "controls", "preload", "poster", "width", "height"],
+			audio: ["src", "controls", "preload", "loop", "muted"],
+			video: ["src", "controls", "preload", "playsinline", "poster", "loop", "muted"],
 			source: ["src", "type"],
+			track: ["src", "kind", "srclang", "label", "default"],
+			iframe: ["src", "title", "loading", "allow", "allowfullscreen", "referrerpolicy", "width", "height"],
 			ol: ["start"],
 			th: ["align"],
 			td: ["align"],
 		},
 		allowedClasses: {
 			code: ["language-*"],
+			div: ["article-media-frame"],
+			figure: ["article-media", "article-media-audio", "article-media-video", "article-media-embed"],
 		},
-		allowedSchemes: ["http", "https", "mailto"],
+		allowedSchemes: ["https", "mailto"],
 		allowProtocolRelative: false,
 		disallowedTagsMode: "completelyDiscard",
-		nonTextTags: ["script", "style", "textarea", "option", "iframe", "object", "embed"],
+		nonTextTags: ["script", "style", "textarea", "option", "object", "embed"],
 		transformTags: {
-			a: (tagName, attribs) => ({
-				tagName,
-				attribs: { ...attribs, rel: "noopener noreferrer" },
-			}),
-			img: (tagName, attribs) => ({
-				tagName,
-				attribs: { ...attribs, src: previewImageSource(attribs.src) },
-			}),
-			audio: (tagName, attribs) => ({
-				tagName,
-				attribs: { ...attribs, src: previewMediaSource(attribs.src) },
-			}),
+			a: (tagName, attribs) => ({ tagName, attribs: { ...attribs, rel: "noopener noreferrer" } }),
+			img: (tagName, attribs) => ({ tagName, attribs: { ...attribs, src: previewImageSource(attribs.src) } }),
+			audio: (tagName, attribs) => ({ tagName, attribs: { ...attribs, src: previewMediaSource(attribs.src, "audio") } }),
 			video: (tagName, attribs) => ({
 				tagName,
-				attribs: {
-					...attribs,
-					src: previewMediaSource(attribs.src),
-					poster: previewImageSource(attribs.poster),
-				},
+				attribs: { ...attribs, src: previewMediaSource(attribs.src, "video"), poster: previewImageSource(attribs.poster) },
 			}),
-			source: (tagName, attribs) => ({
+			source: (tagName, attribs) => ({ tagName, attribs: { ...attribs, src: previewMediaSource(attribs.src, ["audio", "video"]) } }),
+			track: (tagName, attribs) => ({ tagName, attribs: { ...attribs, src: "" } }),
+			iframe: (tagName, attribs) => ({
 				tagName,
-				attribs: { ...attribs, src: previewMediaSource(attribs.src) },
+				attribs: {
+					src: previewExternalVideoSource(attribs.src),
+					title: String(attribs.title || "External video").replace(/[\r\n<>]/g, " ").slice(0, 180),
+					loading: "lazy",
+					allow: EXTERNAL_VIDEO_ALLOW,
+					allowfullscreen: "true",
+					referrerpolicy: EXTERNAL_VIDEO_REFERRER_POLICY,
+				},
 			}),
 		},
 		exclusiveFilter: (frame) =>
-			["img", "audio", "video", "source"].includes(frame.tag) && !frame.attribs.src,
+			["img", "source", "track", "iframe"].includes(frame.tag) && !frame.attribs.src,
 	};
 }
 
@@ -957,6 +950,8 @@ async function previewMarkdown(input) {
 		gfm: true,
 		smartypants: false,
 		syntaxHighlight: false,
+		remarkPlugins: [remarkDirective, parseDirectiveNode, remarkRawHtmlPolicy],
+		rehypePlugins: [rehypeMediaEmbeds],
 	});
 	try {
 		const renderer = await previewMarkdownRendererPromise;
@@ -968,6 +963,18 @@ async function previewMarkdown(input) {
 	} catch (error) {
 		throw new StudioError(`Markdown 预览渲染失败：${error.message || "未知错误"}`, 422);
 	}
+}
+
+function normalizeExternalVideoEmbed(input) {
+	const normalized = normalizeExternalVideoUrl(input?.url);
+	if (!normalized) {
+		throw new StudioError(
+			"Only approved HTTPS YouTube or Bilibili video links can be embedded",
+			400,
+			"MEDIA_EMBED_URL_INVALID",
+		);
+	}
+	return { ok: true, ...normalized };
 }
 
 async function resolvePreviewAsset(urlPath) {
@@ -2592,6 +2599,11 @@ const server = createServer(async (req, res) => {
 		if (req.method === "POST" && url.pathname === "/api/media/restore") {
 			assertStudioWriteRequest(req);
 			send(res, 200, await restoreMediaFromTrash(await readContentBody(req)));
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/media/embed/normalize") {
+			assertStudioWriteRequest(req);
+			send(res, 200, normalizeExternalVideoEmbed(await readContentBody(req)));
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/images") {

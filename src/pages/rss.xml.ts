@@ -12,6 +12,7 @@ import { experimental_AstroContainer as AstroContainer } from "astro/container";
 import sanitizeHtml from "sanitize-html";
 import { siteConfig } from "@/config";
 import pkg from "../../package.json";
+import { normalizeEmbeddedMediaPath, normalizeExternalVideoUrl } from "../../shared/media-embed-policy.mjs";
 
 function stripInvalidXmlChars(str: string): string {
 	return str.replace(
@@ -19,6 +20,40 @@ function stripInvalidXmlChars(str: string): string {
 		/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\uFDD0-\uFDEF\uFFFE\uFFFF]/g,
 		"",
 	);
+}
+
+function absoluteMediaUrl(publicPath: string, site: URL | undefined) {
+	return new URL(publicPath, site ?? new URL("https://yuanxiao48.github.io")).href;
+}
+
+function rssMediaSanitizer(site: URL | undefined) {
+	const localMediaLink = (tagName: string, attribs: Record<string, string | undefined>, kind: "audio" | "video") => {
+		const media = normalizeEmbeddedMediaPath(attribs.src, kind);
+		return media
+			? { tagName: "a", attribs: { href: absoluteMediaUrl(media.publicPath, site), rel: "noopener noreferrer" }, text: tagName === "audio" ? "Listen to audio" : "Watch video" }
+			: { tagName: "span", text: "Media removed from RSS" };
+	};
+	return {
+		allowedTags: sanitizeHtml.defaults.allowedTags.concat(["figure", "figcaption", "img"]),
+		allowedAttributes: {
+			...sanitizeHtml.defaults.allowedAttributes,
+			a: ["href", "rel", "title"],
+			img: ["src", "alt", "title", "width", "height", "loading"],
+		},
+		allowedSchemes: ["https", "mailto"],
+		allowProtocolRelative: false,
+		nonTextTags: ["script", "style", "object", "embed", "source", "track"],
+		transformTags: {
+			audio: (tagName: string, attribs: Record<string, string | undefined>) => localMediaLink(tagName, attribs, "audio"),
+			video: (tagName: string, attribs: Record<string, string | undefined>) => localMediaLink(tagName, attribs, "video"),
+			iframe: (_tagName: string, attribs: Record<string, string | undefined>) => {
+				const video = normalizeExternalVideoUrl(attribs.src);
+				return video
+					? { tagName: "a", attribs: { href: video.canonicalUrl, rel: "noopener noreferrer" }, text: "Open external video" }
+					: { tagName: "span", text: "External video removed from RSS" };
+			},
+		},
+	};
 }
 
 export async function GET(context: APIContext) {
@@ -45,9 +80,7 @@ export async function GET(context: APIContext) {
 			pubDate: toArticleDate(post.data.published),
 			description: post.data.description || "",
 			link: url(`/posts/${post.id}/`),
-			content: sanitizeHtml(cleanedContent, {
-				allowedTags: sanitizeHtml.defaults.allowedTags.concat(["img"]),
-			}),
+			content: sanitizeHtml(cleanedContent, rssMediaSanitizer(context.site)),
 		});
 	}
 	return rss({

@@ -173,9 +173,23 @@ export function createMediaManager() {
 		} else {
 			const media = document.createElement(item.kind === "audio" ? "audio" : "video");
 			media.src = studioAssetUrl(item.publicPath); media.controls = true; media.preload = "metadata"; if (item.kind === "video") media.playsInline = true;
+			const compatibilityNotice = item.kind === "video"
+				? Object.assign(document.createElement("p"), {
+					className: "studio-media-video-compatibility",
+					textContent: "文件已上传，但浏览器可能不支持其视频编码。建议转换为 H.264 + AAC 的 MP4。",
+					hidden: true,
+				})
+				: null;
+			const showCompatibilityNotice = () => { if (compatibilityNotice) compatibilityNotice.hidden = false; };
+			if (item.kind === "video") {
+				media.addEventListener("error", showCompatibilityNotice);
+				media.addEventListener("loadedmetadata", () => {
+					if (media.videoWidth === 0 || media.videoHeight === 0) showCompatibilityNotice();
+				});
+			}
 			media.addEventListener("loadedmetadata", () => { duration.textContent = `时长 ${formatDuration(media.duration)}`; });
 			media.addEventListener("error", () => { duration.textContent = "预览加载失败；文件没有被修改。"; });
-			duration.textContent = "正在读取时长…"; preview.append(title, meta, media, duration, pathText);
+			duration.textContent = "正在读取时长…"; preview.append(title, meta, media, duration, ...(compatibilityNotice ? [compatibilityNotice] : []), pathText);
 		}
 		appendCopyButton(preview, item.publicPath);
 		const refsButton = document.createElement("button"); refsButton.type = "button"; refsButton.className = "btn small"; refsButton.textContent = "查看引用";

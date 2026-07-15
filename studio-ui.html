@@ -6,6 +6,7 @@
 		<meta name="studio-session-token" content="__STUDIO_SESSION_TOKEN__" />
 		<title>博客操作台</title>
 		<link rel="stylesheet" href="./studio-editor.css" />
+		<link rel="stylesheet" href="./studio-article-media-picker.css" />
 		<link rel="stylesheet" href="./studio-cms.css" />
 		<link rel="stylesheet" href="./studio-media.css" />
 		<style>
@@ -1028,6 +1029,8 @@
 										<button class="btn small" data-editor-command="quote" type="button">引用</button>
 										<button class="btn small" data-editor-command="link" type="button">链接</button>
 										<button class="btn small" data-editor-command="image" type="button">图片</button>
+										<button class="btn small" data-editor-command="audio" type="button">音频</button>
+										<button class="btn small" data-editor-command="video" type="button">视频</button>
 										<button class="btn small" data-editor-command="ul" type="button">无序列表</button>
 										<button class="btn small" data-editor-command="ol" type="button">有序列表</button>
 										<button class="btn small" data-editor-command="code" type="button">代码</button>
@@ -1146,6 +1149,61 @@
 					<div class="actions">
 						<button id="cancelArticleImagePicker" class="btn" type="button">取消</button>
 						<button id="confirmArticleImagePicker" class="btn primary" type="button" disabled>插入正文</button>
+					</div>
+				</footer>
+			</section>
+		</div>
+
+		<div id="articleMediaPicker" class="studio-article-media-backdrop hidden" aria-hidden="true">
+			<section class="studio-article-media-picker" role="dialog" aria-modal="true" aria-labelledby="articleMediaPickerTitle">
+				<header class="article-media-picker-header">
+					<div>
+						<h2 id="articleMediaPickerTitle">插入正文音频</h2>
+						<p>媒体会保存为可部署的站内路径；不会写入电脑本地路径。</p>
+					</div>
+					<button id="closeArticleMediaPicker" class="btn small" type="button" aria-label="关闭媒体选择器">关闭</button>
+				</header>
+				<div id="articleMediaSourceTabs" class="article-media-source-tabs hidden" role="tablist" aria-label="视频来源">
+					<button class="btn small active" type="button" role="tab" data-article-media-source="local">本地视频</button>
+					<button class="btn small" type="button" role="tab" data-article-media-source="external">外部视频</button>
+				</div>
+				<section id="articleMediaLocalPanel" class="article-media-local-panel">
+					<div class="article-media-picker-toolbar">
+						<input id="articleMediaSearch" type="search" placeholder="搜索文件名或路径" />
+						<button id="refreshArticleMedia" class="btn small" type="button">刷新媒体库</button>
+					</div>
+					<div id="articleMediaPickerState" class="article-media-picker-state" role="status">准备读取媒体库。</div>
+					<div id="articleMediaGrid" class="article-media-grid"></div>
+					<div class="article-media-upload">
+						<input id="articleMediaUpload" type="file" />
+						<button id="uploadArticleMedia" class="btn small" type="button">上传媒体</button>
+						<span id="articleMediaUploadStatus" class="article-media-picker-state"></span>
+					</div>
+					<div id="articleVideoPosterField" class="field hidden">
+						<label>视频封面</label>
+						<div class="article-media-poster-actions">
+							<button id="chooseArticleVideoPoster" class="btn small" type="button">选择封面图片</button>
+							<button id="clearArticleVideoPoster" class="btn small" type="button">清除封面</button>
+						</div>
+						<span id="articleVideoPosterPath" class="path-pill">未选择封面</span>
+					</div>
+				</section>
+				<section id="articleMediaExternalPanel" class="article-media-external-panel hidden">
+					<label for="articleExternalVideoUrl">YouTube 或 Bilibili 视频链接</label>
+					<input id="articleExternalVideoUrl" inputmode="url" placeholder="粘贴普通视频链接，不接受 iframe 代码" />
+					<p id="articleExternalVideoResult" class="article-media-picker-state">仅接受 YouTube 和 Bilibili 的普通视频链接。</p>
+				</section>
+				<div class="article-media-options">
+					<label for="articleMediaCaption">说明（可选）</label>
+					<input id="articleMediaCaption" placeholder="会显示在播放器下方" />
+					<label id="articleMediaPreloadField" for="articleMediaPreload">预加载</label>
+					<select id="articleMediaPreload"><option value="metadata">metadata</option><option value="none">none</option></select>
+				</div>
+				<footer class="article-media-picker-footer">
+					<span id="articleMediaSelection" class="path-pill">尚未选择媒体</span>
+					<div class="actions">
+						<button id="cancelArticleMediaPicker" class="btn" type="button">取消</button>
+						<button id="confirmArticleMediaPicker" class="btn primary" type="button" disabled>插入正文</button>
 					</div>
 				</footer>
 			</section>
@@ -2031,6 +2089,7 @@
 
 			loadSettings().catch((err) => setStatus(err.message, "bad"));
 		</script>
+		<script src="./studio-article-media-picker.js"></script>
 		<script src="./studio-editor.js"></script>
 		<script>
 			(async () => {

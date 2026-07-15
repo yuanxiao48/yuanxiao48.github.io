@@ -607,6 +607,121 @@ function insertMarkdownImage(imagePath, alt) {
 	scheduleDraft();
 }
 
+function isDeployableArticleMediaPath(value, kind) {
+	const path = String(value || "").trim();
+	const extensions = kind === "audio"
+		? "mp3|m4a|aac|wav|ogg|flac"
+		: kind === "video"
+			? "mp4|webm|mov"
+			: "";
+	return Boolean(
+		extensions &&
+			path.startsWith(`/assets/${kind}/`) &&
+			!path.includes("\\") &&
+			!path.includes("\0") &&
+			!path.includes("../") &&
+			!path.includes("/..") &&
+			!/^file:|^javascript:|^data:|^[a-z]:[\\/]/i.test(path) &&
+			new RegExp(`\\.(${extensions})$`, "i").test(path),
+	);
+}
+
+function isDeployableVideoPosterPath(value) {
+	const path = String(value || "").trim();
+	return Boolean(
+		isDeployableArticleImagePath(path) &&
+			path.startsWith("/assets/images/posts/") &&
+			/\.(avif|gif|jpe?g|png|webp)$/i.test(path),
+	);
+}
+
+function escapeHtml(value) {
+	return String(value || "")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
+}
+
+function normalisePreload(value) {
+	return value === "none" ? "none" : "metadata";
+}
+
+function insertMediaMarkup(markup) {
+	const start = body.selectionStart;
+	const end = body.selectionEnd;
+	const before = body.value.slice(0, start);
+	const after = body.value.slice(end);
+	const lineBefore = before.slice(before.lastIndexOf("\n") + 1);
+	const nextNewline = after.indexOf("\n");
+	const lineAfter = nextNewline === -1 ? after : after.slice(0, nextNewline);
+	const prefix = lineBefore.trim() ? "\n" : "";
+	const suffix = lineAfter.trim() ? "\n" : "";
+	body.setRangeText(`${prefix}${markup}${suffix}`, start, end, "end");
+	const cursor = start + prefix.length + markup.length;
+	body.selectionStart = cursor;
+	body.selectionEnd = cursor;
+	body.focus();
+	scheduleDraft();
+}
+
+function directiveAttribute(name, value) {
+	const text = String(value || "").trim();
+	if (!text) return "";
+	return ` ${name}="${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\r\n]/g, " ")}"`;
+}
+
+function mediaDirective(name, attributes) {
+	return `::${name}{${Object.entries(attributes).map(([key, value]) => directiveAttribute(key, value)).join("").trim()}}`;
+}
+
+function insertArticleMedia(payload) {
+	if (payload?.kind === "audio") {
+		if (!isDeployableArticleMediaPath(payload.publicPath, "audio")) throw new Error("音频路径不安全，无法插入正文。");
+		insertMediaMarkup(mediaDirective("audio", {
+			src: payload.publicPath,
+			preload: normalisePreload(payload.preload),
+			caption: payload.caption,
+		}));
+		return;
+	}
+	if (payload?.kind === "video") {
+		if (!isDeployableArticleMediaPath(payload.publicPath, "video")) throw new Error("视频路径不安全，无法插入正文。");
+		if (payload.posterPath && !isDeployableVideoPosterPath(payload.posterPath)) throw new Error("视频封面必须来自 /assets/images/posts/。");
+		insertMediaMarkup(mediaDirective("video", {
+			src: payload.publicPath,
+			poster: payload.posterPath,
+			preload: normalisePreload(payload.preload),
+			caption: payload.caption,
+		}));
+		return;
+	}
+	if (payload?.kind === "external") {
+		const provider = payload.provider === "youtube" || payload.provider === "bilibili" ? payload.provider : "";
+		const id = String(payload.id || "");
+		const canonicalUrl = String(payload.canonicalUrl || "");
+		if (!provider || !id || !/^https:\/\/(?:www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}|www\.bilibili\.com\/video\/BV[A-Za-z0-9]{10}(?:\?p=\d+)?)$/.test(canonicalUrl)) {
+			throw new Error("外部视频地址未通过安全验证。");
+		}
+		insertMediaMarkup(mediaDirective("embed", {
+			provider,
+			id,
+			canonicalUrl,
+			caption: payload.caption,
+		}));
+		return;
+	}
+	throw new Error("未知媒体类型。");
+}
+
+function openArticleMediaPicker(mode) {
+	if (!window.StudioArticleMediaPicker?.open) {
+		throw new Error("媒体选择器尚未加载，请刷新 Studio 后重试。");
+	}
+	window.StudioArticleMediaPicker.open({ mode, onInsert: insertArticleMedia });
+}
+
 function readImageFileAsDataUrl(file) {
 	return new Promise((resolve, reject) => {
 		const reader = new FileReader();
@@ -975,6 +1090,14 @@ function runCommand(command) {
 	if (command === "link") wrapSelection("[", "](https://example.com)", "链接文本");
 	if (command === "image") {
 		openImagePicker("insert");
+		return;
+	}
+	if (command === "audio") {
+		openArticleMediaPicker("audio");
+		return;
+	}
+	if (command === "video") {
+		openArticleMediaPicker("video");
 		return;
 	}
 	if (command === "ul") prefixLines("- ");
