@@ -26,9 +26,50 @@ export const TRANSCODE_TASK_STATES = Object.freeze([
 	"uploading",
 	"probing",
 	"ready",
+	"queued",
+	"transcoding",
+	"validating-output",
+	"cancelling",
+	"completed",
 	"failed",
+	"cancelled",
 	"discarded",
 	"interrupted",
+]);
+
+// Recovery-only edges let a Studio restart safely stop work that cannot continue.
+export const TRANSCODE_STATE_TRANSITIONS = Object.freeze({
+	creating: Object.freeze(["uploading", "probing", "failed", "interrupted"]),
+	uploading: Object.freeze(["probing", "failed", "discarded", "interrupted"]),
+	probing: Object.freeze(["ready", "failed", "interrupted"]),
+	ready: Object.freeze(["queued", "discarded"]),
+	queued: Object.freeze(["transcoding", "cancelled", "failed", "ready"]),
+	transcoding: Object.freeze(["validating-output", "cancelling", "failed", "interrupted"]),
+	"validating-output": Object.freeze(["completed", "failed", "interrupted"]),
+	cancelling: Object.freeze(["cancelled", "failed", "interrupted"]),
+	completed: Object.freeze(["queued", "discarded"]),
+	failed: Object.freeze(["queued", "discarded"]),
+	cancelled: Object.freeze(["queued", "discarded"]),
+	interrupted: Object.freeze(["queued", "discarded"]),
+	discarded: Object.freeze([]),
+});
+
+export const TRANSCODE_TERMINAL_STATES = Object.freeze([
+	"completed",
+	"failed",
+	"cancelled",
+	"interrupted",
+	"discarded",
+]);
+
+export const TRANSCODE_LIBRARY_LOCK_STATES = Object.freeze([
+	"creating",
+	"probing",
+	"ready",
+	"queued",
+	"transcoding",
+	"validating-output",
+	"cancelling",
 ]);
 
 export const TRANSCODE_SOURCE_EXTENSIONS = Object.freeze({
@@ -72,4 +113,42 @@ export function getTranscodeSourceKindForExtension(extension) {
 
 export function isTranscodeTaskState(value) {
 	return TRANSCODE_TASK_STATES.includes(value);
+}
+
+export function canTransitionTranscodeJob(fromState, toState) {
+	return Boolean(TRANSCODE_STATE_TRANSITIONS[fromState]?.includes(toState));
+}
+
+export function isTerminalTranscodeState(value) {
+	return TRANSCODE_TERMINAL_STATES.includes(value);
+}
+
+export function shouldLockTranscodeLibrarySource(value) {
+	return TRANSCODE_LIBRARY_LOCK_STATES.includes(value);
+}
+
+export function transitionTranscodeJobState(job, nextState, patch = {}, now = new Date().toISOString()) {
+	if (!job || !canTransitionTranscodeJob(job.state, nextState)) {
+		const error = new Error("Transcode task state transition is not allowed");
+		error.code = "TRANSCODE_STATE_TRANSITION_INVALID";
+		throw error;
+	}
+	const runtime = {
+		queuedAt: job.runtime?.queuedAt ?? null,
+		startedAt: job.runtime?.startedAt ?? null,
+		finishedAt: job.runtime?.finishedAt ?? null,
+		attempt: Number.isSafeInteger(job.runtime?.attempt) ? job.runtime.attempt : 0,
+	};
+	if (nextState === "queued") {
+		runtime.queuedAt = now;
+		runtime.startedAt = null;
+		runtime.finishedAt = null;
+	}
+	if (nextState === "transcoding") {
+		runtime.startedAt = now;
+		runtime.finishedAt = null;
+		runtime.attempt += 1;
+	}
+	if (isTerminalTranscodeState(nextState)) runtime.finishedAt = now;
+	return { ...job, ...patch, state: nextState, updatedAt: now, runtime };
 }

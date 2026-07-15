@@ -44,13 +44,21 @@ import {
 } from "./shared/media-embed-policy.mjs";
 import {
 	isTranscodeInputKind,
+	isTerminalTranscodeState,
 	getTranscodeSourceKindForExtension,
 	isTranscodeTaskState,
+	shouldLockTranscodeLibrarySource,
 	supportsTranscodePlatform,
+	transitionTranscodeJobState,
 	TRANSCODE_LOCAL_SETTINGS,
 	TRANSCODE_PROTOCOLS,
 	TRANSCODE_TASKS,
 } from "./shared/transcode-policy.mjs";
+import {
+	createManagedTranscodeProcesses,
+	createProgressPersistence,
+	createTranscodeQueue,
+} from "./shared/transcode-runtime.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const settingsPath = path.join(root, "src", "config", "userSettings.json");
@@ -95,6 +103,15 @@ const TOOL_PROBE_TIMEOUT_MS = 10000;
 const TOOL_OUTPUT_MAX_BYTES = 1024 * 1024;
 const STUDIO_SESSION_TOKEN = randomUUID();
 const activeTranscodeSourceLocks = new Map();
+const managedTranscodeProcesses = createManagedTranscodeProcesses();
+const transcodeQueue = createTranscodeQueue({
+	runJob: async () => {
+		throw new StudioError("The audio runner is not enabled in this Studio phase", 409, "TRANSCODE_RUNNER_NOT_ENABLED");
+	},
+	onJobError: async (jobId, error) => {
+		console.warn(`Studio transcode queue runner stopped for ${jobId}:`, error.code || error.message);
+	},
+});
 
 let previewMarkdownRendererPromise;
 
@@ -1721,6 +1738,43 @@ function transcodeJobError(error) {
 	};
 }
 
+function isSafeIsoTime(value) {
+	return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function normalizeTranscodeProgress(value) {
+	if (value === null || value === undefined) return null;
+	if (!isRecord(value)) throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
+	const numberOrNull = (item) => item === null || item === undefined || (typeof item === "number" && Number.isFinite(item) && item >= 0);
+	if (!numberOrNull(value.percent) || !numberOrNull(value.processedSeconds) || !numberOrNull(value.speed) || !numberOrNull(value.etaSeconds)
+		|| (value.updatedAt !== null && value.updatedAt !== undefined && !isSafeIsoTime(value.updatedAt))) {
+		throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
+	}
+	return {
+		percent: value.percent ?? null,
+		processedSeconds: value.processedSeconds ?? null,
+		speed: value.speed ?? null,
+		etaSeconds: value.etaSeconds ?? null,
+		updatedAt: value.updatedAt ?? null,
+	};
+}
+
+function normalizeTranscodeRuntime(value) {
+	if (value === null || value === undefined) {
+		return { queuedAt: null, startedAt: null, finishedAt: null, attempt: 0 };
+	}
+	if (!isRecord(value) || !Number.isSafeInteger(value.attempt) || value.attempt < 0
+		|| [value.queuedAt, value.startedAt, value.finishedAt].some((item) => item !== null && item !== undefined && !isSafeIsoTime(item))) {
+		throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
+	}
+	return {
+		queuedAt: value.queuedAt ?? null,
+		startedAt: value.startedAt ?? null,
+		finishedAt: value.finishedAt ?? null,
+		attempt: value.attempt,
+	};
+}
+
 function transcodeJobSummary(job) {
 	return {
 		version: job.version,
@@ -1736,6 +1790,11 @@ function transcodeJobSummary(job) {
 		preset: job.preset || null,
 		encoder: job.encoder || null,
 		progress: job.progress || null,
+		runtime: job.runtime || null,
+		queuePosition: transcodeQueue.getPosition(job.id),
+		canStartAudio: false,
+		canCancel: false,
+		canRetry: ["failed", "cancelled", "interrupted"].includes(job.state),
 		output: job.output || null,
 		error: job.error || null,
 	};
@@ -1744,7 +1803,10 @@ function transcodeJobSummary(job) {
 function validateTranscodeJob(value) {
 	if (!isRecord(value) || value.version !== TRANSCODE_TASKS.manifestVersion || !safeTranscodeJobId(value.id)
 		|| !isTranscodeTaskState(value.state) || !["upload", "library"].includes(value.sourceType)
-		|| typeof value.createdAt !== "string" || typeof value.updatedAt !== "string") {
+		|| !isSafeIsoTime(value.createdAt) || !isSafeIsoTime(value.updatedAt)) {
+		throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
+	}
+	if (value.sourceModifiedAt !== null && value.sourceModifiedAt !== undefined && !isSafeIsoTime(value.sourceModifiedAt)) {
 		throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
 	}
 	if (value.sourceType === "library") {
@@ -1761,6 +1823,8 @@ function validateTranscodeJob(value) {
 	if (value.sourceSize !== null && value.sourceSize !== undefined && (!Number.isSafeInteger(value.sourceSize) || value.sourceSize < 0 || value.sourceSize > TRANSCODE_TASKS.sourceMaxBytes)) {
 		throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
 	}
+	value.progress = normalizeTranscodeProgress(value.progress);
+	value.runtime = normalizeTranscodeRuntime(value.runtime);
 	return value;
 }
 
@@ -1786,6 +1850,39 @@ async function getSafeTranscodeTaskDirectory(id, { mustExist = true } = {}) {
 async function writeTranscodeJob(directory, job) {
 	validateTranscodeJob(job);
 	await atomicWriteFile(path.join(directory, "job.json"), `${JSON.stringify(job, null, 2)}\n`);
+}
+
+async function persistTranscodeJobTransition(directory, job, nextState, patch = {}) {
+	if (nextState === "queued") {
+		await revalidateTranscodeSource({ job, directory });
+		if (job.state === "completed") await cleanupTranscodePartialOutput(directory, { removeAll: true });
+	}
+	let next;
+	try {
+		next = transitionTranscodeJobState(job, nextState, patch);
+	} catch (error) {
+		throw new StudioError(`Cannot move transcode task from ${job.state} to ${nextState}`, 409, error.code || "TRANSCODE_STATE_TRANSITION_INVALID");
+	}
+	if (next.sourceType === "library" && shouldLockTranscodeLibrarySource(next.state)) lockTranscodeSource(next);
+	await writeTranscodeJob(directory, next);
+	if (next.sourceType === "library") {
+		if (!shouldLockTranscodeLibrarySource(next.state)) releaseTranscodeSourceLock(next);
+	}
+	return next;
+}
+
+const transcodeProgressPersistence = createProgressPersistence({
+	write: async (jobId, progress) => {
+		const task = await readTranscodeJob(jobId);
+		if (!task.job.state || isTerminalTranscodeState(task.job.state)) return;
+		task.job.progress = normalizeTranscodeProgress(progress);
+		task.job.updatedAt = new Date().toISOString();
+		await writeTranscodeJob(task.directory, task.job);
+	},
+});
+
+async function flushJobProgress(jobId) {
+	await transcodeProgressPersistence.flush(jobId);
 }
 
 async function readTranscodeJob(id) {
@@ -1827,11 +1924,13 @@ function newTranscodeJob(sourceType) {
 		sourcePublicPath: null,
 		sourceFilename: null,
 		sourceSize: null,
+		sourceModifiedAt: null,
 		sourceStoredFilename: null,
 		probe: null,
 		preset: null,
 		encoder: null,
 		progress: null,
+		runtime: { queuedAt: null, startedAt: null, finishedAt: null, attempt: 0 },
 		output: null,
 		error: null,
 	};
@@ -1867,6 +1966,56 @@ function lockTranscodeSource(job) {
 
 function isMediaLockedForTranscode(publicPath) {
 	return activeTranscodeSourceLocks.has(publicPath);
+}
+
+async function getSafeTranscodeOutputDirectory(directory, { create = false } = {}) {
+	const outputDirectory = path.join(directory, "output");
+	const info = await lstat(outputDirectory).catch(() => null);
+	if (!info && create) {
+		await mkdir(outputDirectory, { recursive: false });
+		return outputDirectory;
+	}
+	if (!info) return null;
+	if (!info.isDirectory() || info.isSymbolicLink()) throw new StudioError("Transcode output directory is invalid", 422, "TRANSCODE_OUTPUT_DIRECTORY_INVALID");
+	await assertNoSymlinksWithin(directory, outputDirectory);
+	return outputDirectory;
+}
+
+async function cleanupTranscodePartialOutput(directory, { removeAll = false } = {}) {
+	const outputDirectory = await getSafeTranscodeOutputDirectory(directory);
+	if (!outputDirectory) return;
+	for (const entry of await readdir(outputDirectory, { withFileTypes: true })) {
+		if (!entry.isFile() || entry.isSymbolicLink()) continue;
+		if (removeAll || entry.name.startsWith("output.partial.") || entry.name.startsWith("output.")) {
+			await safeRemove(path.join(outputDirectory, entry.name));
+		}
+	}
+}
+
+async function cleanupTranscodeTaskPartFiles(directory) {
+	for (const entry of await readdir(directory, { withFileTypes: true })) {
+		if (entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".part")) await safeRemove(path.join(directory, entry.name));
+	}
+}
+
+async function revalidateTranscodeSource(task) {
+	const { job, directory } = task;
+	if (job.sourceType === "library") {
+		const media = await getSafeMediaFile(job.sourcePublicPath);
+		if (!media.exists || !isTranscodeInputKind(media.kind)) throw new StudioError("Library source is no longer available", 409, "TRANSCODE_SOURCE_MISSING");
+		if (media.info.size !== job.sourceSize || (job.sourceModifiedAt && media.info.mtime.toISOString() !== job.sourceModifiedAt)) {
+			throw new StudioError("Library source changed after task preparation", 409, "TRANSCODE_SOURCE_CHANGED");
+		}
+		return media;
+	}
+	if (!job.sourceStoredFilename) throw new StudioError("Uploaded source file is unavailable", 409, "TRANSCODE_SOURCE_MISSING");
+	const sourceFile = path.join(directory, job.sourceStoredFilename);
+	const info = await lstat(sourceFile).catch(() => null);
+	if (!info?.isFile() || info.isSymbolicLink() || info.size !== job.sourceSize || (job.sourceModifiedAt && info.mtime.toISOString() !== job.sourceModifiedAt)) {
+		throw new StudioError("Uploaded source changed or is unavailable", 409, "TRANSCODE_SOURCE_CHANGED");
+	}
+	await assertNoSymlinksWithin(directory, sourceFile);
+	return { file: sourceFile, info, publicPath: null };
 }
 
 async function assertTranscodeDiskSpace(expectedSourceBytes = 0) {
@@ -1957,12 +2106,8 @@ async function probeTranscodeSource(media) {
 }
 
 async function markTranscodeJobFailed(directory, job, error) {
-	job.state = "failed";
-	job.updatedAt = new Date().toISOString();
-	job.error = transcodeJobError(error);
-	await writeTranscodeJob(directory, job);
-	releaseTranscodeSourceLock(job);
-	return { ok: true, job: transcodeJobSummary(job) };
+	const failed = await persistTranscodeJobTransition(directory, job, "failed", { error: transcodeJobError(error) });
+	return { ok: true, job: transcodeJobSummary(failed) };
 }
 
 async function createTranscodeJobFromLibrary(input) {
@@ -1972,22 +2117,19 @@ async function createTranscodeJobFromLibrary(input) {
 	}
 	const media = await getSafeMediaFile(parsed.publicPath);
 	if (!media.exists) throw new StudioError("Media file was not found", 404, "MEDIA_NOT_FOUND");
-	const job = newTranscodeJob("library");
+	let job = newTranscodeJob("library");
 	job.sourcePublicPath = media.publicPath;
 	job.sourceFilename = path.basename(media.relativePath);
 	job.sourceSize = media.info.size;
+	job.sourceModifiedAt = media.info.mtime.toISOString();
 	await assertTranscodeDiskSpace(job.sourceSize);
 	lockTranscodeSource(job);
 	let directory = "";
 	try {
 		directory = await createTranscodeJobDirectory(job);
-		job.state = "probing";
-		job.updatedAt = new Date().toISOString();
-		await writeTranscodeJob(directory, job);
+		job = await persistTranscodeJobTransition(directory, job, "probing");
 		job.probe = await probeTranscodeSource(media);
-		job.state = "ready";
-		job.updatedAt = new Date().toISOString();
-		await writeTranscodeJob(directory, job);
+		job = await persistTranscodeJobTransition(directory, job, "ready", { error: null });
 		return { ok: true, job: transcodeJobSummary(job) };
 	} catch (error) {
 		if (!directory) {
@@ -2026,11 +2168,9 @@ async function receiveTranscodeSourceUpload(req) {
 		throw new StudioError("Source upload must use multipart/form-data", 415, "TRANSCODE_SOURCE_MULTIPART_REQUIRED");
 	}
 	await assertTranscodeDiskSpace(0);
-	const job = newTranscodeJob("upload");
+	let job = newTranscodeJob("upload");
 	const directory = await createTranscodeJobDirectory(job);
-	job.state = "uploading";
-	job.updatedAt = new Date().toISOString();
-	await writeTranscodeJob(directory, job);
+	job = await persistTranscodeJobTransition(directory, job, "uploading");
 	let partFile = "";
 	let finalFile = "";
 	let received = null;
@@ -2074,14 +2214,11 @@ async function receiveTranscodeSourceUpload(req) {
 		job.sourceFilename = source.filename;
 		job.sourceStoredFilename = path.basename(finalFile);
 		job.sourceSize = info.size;
-		job.state = "probing";
-		job.updatedAt = new Date().toISOString();
-		await writeTranscodeJob(directory, job);
+		job.sourceModifiedAt = info.mtime.toISOString();
+		job = await persistTranscodeJobTransition(directory, job, "probing");
 		const media = { file: finalFile, publicPath: null, kind: source.kind, extension: source.extension, info };
 		job.probe = await probeTranscodeSource(media);
-		job.state = "ready";
-		job.updatedAt = new Date().toISOString();
-		await writeTranscodeJob(directory, job);
+		job = await persistTranscodeJobTransition(directory, job, "ready", { error: null });
 		return { ok: true, job: transcodeJobSummary(job) };
 	} catch (error) {
 		if (partFile) {
@@ -2089,8 +2226,7 @@ async function receiveTranscodeSourceUpload(req) {
 			await safeRemove(partFile);
 		}
 		if (aborted) {
-			job.state = "discarded"; job.updatedAt = new Date().toISOString(); job.error = transcodeJobError(error);
-			await writeTranscodeJob(directory, job).catch(() => {});
+			await persistTranscodeJobTransition(directory, job, "discarded", { error: transcodeJobError(error) }).catch(() => {});
 			await rm(directory, { recursive: true, force: true }).catch(() => {});
 			throw error;
 		}
@@ -2101,10 +2237,7 @@ async function receiveTranscodeSourceUpload(req) {
 async function discardTranscodeJob(id) {
 	const task = await readTranscodeJob(id);
 	const { job } = task;
-	job.state = "discarded";
-	job.updatedAt = new Date().toISOString();
-	await writeTranscodeJob(task.directory, job);
-	releaseTranscodeSourceLock(job);
+	await persistTranscodeJobTransition(task.directory, job, "discarded");
 	await rm(task.directory, { recursive: true, force: true });
 	return { ok: true, id: job.id, discarded: true };
 }
@@ -2137,6 +2270,7 @@ async function cleanupTranscodeTasks({ onlyExpired = false } = {}) {
 	const taskRoot = await getSafeTranscodeRoot();
 	const now = Date.now();
 	const result = { ok: true, removed: 0, interrupted: 0, quarantined: 0, errors: [] };
+	if (!onlyExpired) activeTranscodeSourceLocks.clear();
 	for (const entry of await readdir(taskRoot.directory, { withFileTypes: true })) {
 		if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
 		if (!safeTranscodeJobId(entry.name)) continue;
@@ -2148,20 +2282,31 @@ async function cleanupTranscodeTasks({ onlyExpired = false } = {}) {
 			catch { result.errors.push({ id: entry.name, error: "Corrupt task could not be isolated" }); }
 			continue;
 		}
-		const { job, directory } = task;
+		let { job, directory } = task;
 		if (!onlyExpired && ["creating", "uploading", "probing"].includes(job.state)) {
-			for (const child of await readdir(directory, { withFileTypes: true })) {
-				if (child.isFile() && !child.isSymbolicLink() && (child.name.endsWith(".part") || child.name.startsWith("output"))) await safeRemove(path.join(directory, child.name));
-			}
-			job.state = "interrupted";
-			job.updatedAt = new Date().toISOString();
-			job.error = { code: "STUDIO_RESTARTED", message: "Studio restarted before source preparation completed" };
-			await writeTranscodeJob(directory, job);
-			releaseTranscodeSourceLock(job);
+			await cleanupTranscodeTaskPartFiles(directory);
+			await cleanupTranscodePartialOutput(directory, { removeAll: true });
+			job = await persistTranscodeJobTransition(directory, job, "interrupted", {
+				error: { code: "STUDIO_RESTARTED", message: "Studio restarted before source preparation completed" },
+			});
+			result.interrupted += 1;
+		}
+		if (!onlyExpired && job.state === "queued") {
+			await cleanupTranscodePartialOutput(directory, { removeAll: true });
+			job = await persistTranscodeJobTransition(directory, job, "ready", {
+				error: { code: "STUDIO_RESTARTED_QUEUE_RESET", message: "Studio restarted; this queued task was not resumed automatically" },
+			});
+		}
+		if (!onlyExpired && ["transcoding", "cancelling", "validating-output"].includes(job.state)) {
+			await cleanupTranscodeTaskPartFiles(directory);
+			await cleanupTranscodePartialOutput(directory, { removeAll: true });
+			job = await persistTranscodeJobTransition(directory, job, "interrupted", {
+				error: { code: "STUDIO_RESTARTED", message: "Studio restarted before transcoding completed" },
+			});
 			result.interrupted += 1;
 		}
 		const age = now - Date.parse(job.updatedAt || job.createdAt);
-		if (Number.isFinite(age) && age > TRANSCODE_TASKS.completedResultRetentionMs && ["ready", "failed", "interrupted", "discarded"].includes(job.state)) {
+		if (Number.isFinite(age) && age > TRANSCODE_TASKS.completedResultRetentionMs && ["ready", "completed", "failed", "cancelled", "interrupted", "discarded"].includes(job.state)) {
 			releaseTranscodeSourceLock(job);
 			await rm(directory, { recursive: true, force: true });
 			result.removed += 1;
@@ -2172,9 +2317,8 @@ async function cleanupTranscodeTasks({ onlyExpired = false } = {}) {
 			if (!entry.isDirectory() || entry.isSymbolicLink() || !safeTranscodeJobId(entry.name)) continue;
 			try {
 				const task = await readTranscodeJob(entry.name);
-				if (task.job.state === "ready" && task.job.sourceType === "library") {
-					const source = await getSafeMediaFile(task.job.sourcePublicPath);
-					if (!source.exists) throw new StudioError("Library source is no longer available", 409, "TRANSCODE_SOURCE_MISSING");
+				if (shouldLockTranscodeLibrarySource(task.job.state) && task.job.sourceType === "library") {
+					await revalidateTranscodeSource(task);
 					lockTranscodeSource(task.job);
 				}
 			} catch {
@@ -3502,6 +3646,11 @@ const server = createServer(async (req, res) => {
 			...(known && error.details ? { details: error.details } : {}),
 		});
 	}
+});
+
+server.on("close", () => {
+	transcodeProgressPersistence.flushAll().catch((error) => console.warn("Studio transcode progress flush skipped:", error.message));
+	managedTranscodeProcesses.clear();
 });
 
 cleanupStaleMediaTemps()
