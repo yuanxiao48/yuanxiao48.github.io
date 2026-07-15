@@ -96,14 +96,14 @@
         "position": "sticky"
       },
       {
-        "type": "announcement",
-        "enable": true,
-        "position": "top"
-      },
-      {
         "type": "categories",
         "enable": true,
         "position": "sticky"
+      },
+      {
+        "type": "announcement",
+        "enable": true,
+        "position": "top"
       },
       {
         "type": "tags",
