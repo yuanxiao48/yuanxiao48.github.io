@@ -1,0 +1,71 @@
+/* Studio 4A shell. Article editor styles remain in studio-editor.css. */
+.layout > .tabs { display: none; }
+.layout { grid-template-columns: 220px minmax(0, 1fr); align-items: start; }
+.studio4a-nav { grid-column: 1; grid-row: 1; position: sticky; top: 22px; display: grid; gap: 8px; }
+.studio4a-nav-item { min-height: 42px; padding: 0 13px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--panel) 86%, transparent); color: var(--muted); text-align: left; transition: border-color 150ms ease, background 150ms ease, color 150ms ease; }
+.studio4a-nav-item:hover { border-color: color-mix(in srgb, var(--accent) 58%, var(--line)); color: var(--text); }
+.studio4a-nav-item.active { border-color: color-mix(in srgb, var(--accent) 74%, var(--line)); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); color: var(--text); }
+.studio4a-main { grid-column: 2; grid-row: 1; min-width: 0; }
+/* Legacy configuration panels stay mounted for their existing script, but 4A owns navigation. */
+.studio4a-main > #settingsForm { display: none; }
+.studio4a-module { min-width: 0; }
+.studio4a-module.hidden { display: none; }
+.studio4a-module-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.studio4a-module-header h2, .studio4a-placeholder h2 { font-size: 21px; }
+.studio4a-module-header p, .studio4a-preview-heading span, .studio4a-placeholder p { margin-top: 5px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.studio4a-save-status { display: inline-flex; min-height: 34px; align-items: center; margin-right: 8px; color: var(--muted); font-size: 12px; }
+.studio4a-save-status.dirty { color: var(--accent-2); }
+.studio4a-save-status.good { color: var(--accent); }
+.studio4a-save-status.bad { color: var(--danger); }
+.studio4a-overview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.studio4a-overview-grid button, .studio4a-placeholder, .studio4a-layout-zone, .studio4a-settings-section, .studio4a-page-editor, .studio4a-page-preview { border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 89%, transparent); box-shadow: 0 10px 24px rgba(0,0,0,.11); }
+.studio4a-overview-grid button { min-height: 124px; padding: 18px; color: var(--text); text-align: left; }
+.studio4a-overview-grid button:hover { border-color: color-mix(in srgb, var(--accent) 64%, var(--line)); background: color-mix(in srgb, var(--accent) 9%, var(--panel)); }
+.studio4a-overview-grid strong, .studio4a-overview-grid span { display: block; }
+.studio4a-overview-grid strong { font-size: 16px; }
+.studio4a-overview-grid span { margin-top: 8px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.studio4a-page-workspace { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(300px, .78fr); gap: 16px; min-height: calc(100vh - 210px); }
+.studio4a-page-editor, .studio4a-page-preview, .studio4a-settings-section { padding: 16px; }
+.studio4a-page-editor { display: grid; grid-template-rows: auto minmax(440px, 1fr) auto; gap: 10px; }
+.studio4a-page-editor label, .studio4a-settings-section label { color: var(--muted); font-size: 12px; font-weight: 650; }
+.studio4a-page-editor textarea { width: 100%; min-height: 440px; resize: vertical; }
+.studio4a-editor-footer, .studio4a-preview-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
+.studio4a-page-preview { overflow: auto; }
+.studio4a-preview-heading { align-items: flex-start; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.studio4a-preview-heading span { margin: 0; max-width: 280px; }
+.studio4a-markdown-preview { padding: 14px 2px; color: var(--text); line-height: 1.75; word-break: break-word; }
+.studio4a-markdown-preview img, .studio4a-markdown-preview video { max-width: 100%; height: auto; border-radius: 8px; }
+.studio4a-markdown-preview audio { max-width: 100%; }
+.studio4a-markdown-preview pre { overflow: auto; padding: 12px; border-radius: 8px; background: var(--panel-3); }
+.studio4a-layout-zones { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.studio4a-layout-zone { min-width: 0; padding: 12px; }
+.studio4a-layout-zone > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 10px; }
+.studio4a-layout-zone h3, .studio4a-settings-section h3 { margin: 0; font-size: 15px; }
+.studio4a-layout-zone select { max-width: 118px; padding: 7px; font-size: 12px; }
+.studio4a-widget-list { display: grid; gap: 8px; min-height: 70px; }
+.studio4a-widget-card { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--line) 88%, transparent); border-radius: 8px; background: var(--panel-3); }
+.studio4a-widget-card.dragging { opacity: .5; }
+.studio4a-widget-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.studio4a-widget-card strong { font-size: 13px; }
+.studio4a-widget-card code, .studio4a-widget-card p { color: var(--muted); font-size: 11px; line-height: 1.4; }
+.studio4a-widget-card p { margin: 0; }
+.studio4a-widget-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.studio4a-widget-controls select, .studio4a-widget-controls button { min-width: 0; padding: 6px; font-size: 11px; }
+.studio4a-widget-tools { display: flex; gap: 5px; }
+.studio4a-widget-tools button { flex: 1; padding: 6px; font-size: 11px; }
+.studio4a-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.studio4a-settings-section { display: grid; align-content: start; gap: 11px; }
+.studio4a-settings-section label { display: grid; gap: 6px; }
+.studio4a-settings-section textarea { min-height: 92px; resize: vertical; }
+.studio4a-inline-field { display: flex; gap: 6px; }
+.studio4a-inline-field input { min-width: 0; flex: 1; }
+.studio4a-check { display: flex !important; align-items: center; gap: 8px; color: var(--text) !important; }
+.studio4a-check input { width: auto; }
+.studio4a-avatar-preview { min-height: 54px; display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+.studio4a-avatar-preview img { width: 52px; height: 52px; object-fit: cover; border: 1px solid var(--line); border-radius: 10px; }
+.studio4a-placeholder { padding: 24px; }
+#studio4a-posts-mount > .tab-panel { display: block; }
+#studio4a-posts-mount .panel-header { display: none; }
+
+@media (max-width: 1180px) { .studio4a-layout-zones, .studio4a-settings-grid { grid-template-columns: 1fr; } .studio4a-page-workspace { grid-template-columns: 1fr; } .studio4a-page-preview { min-height: 280px; } }
+@media (max-width: 820px) { .layout { grid-template-columns: 1fr; } .studio4a-nav, .studio4a-main { grid-column: 1; grid-row: auto; } .studio4a-nav { position: static; grid-template-columns: repeat(3, minmax(0, 1fr)); } .studio4a-nav-item { text-align: center; padding: 0 7px; font-size: 12px; } .studio4a-overview-grid { grid-template-columns: 1fr; } .studio4a-module-header { flex-direction: column; } .studio4a-page-workspace { min-height: auto; } .studio4a-page-editor { grid-template-rows: auto minmax(360px, 1fr) auto; } }

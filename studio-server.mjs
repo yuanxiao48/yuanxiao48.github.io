@@ -11,7 +11,7 @@ import {
 	stat,
 	writeFile,
 } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMarkdownProcessor } from "@astrojs/markdown-remark";
@@ -19,6 +19,9 @@ import sanitizeHtml from "sanitize-html";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const settingsPath = path.join(root, "src", "config", "userSettings.json");
+const aboutPath = path.join(root, "src", "content", "spec", "about.md");
+const announcementPath = path.join(root, "src", "config", "announcementConfig.ts");
+const widgetRegistryPath = path.join(root, "src", "config", "widgetRegistry.json");
 const postsRoot = path.join(root, "src", "content", "posts");
 const srcImagesRoot = path.join(root, "src", "assets", "images");
 const publicImagesRoot = path.join(root, "public", "assets", "images");
@@ -28,8 +31,17 @@ const trashPostsRoot = path.join(root, ".studio-trash", "posts");
 const uiPath = path.join(root, "studio-ui.html");
 const editorScriptPath = path.join(root, "studio-editor.js");
 const editorStylesPath = path.join(root, "studio-editor.css");
+const studioAssets = new Map([
+	["/studio-cms.css", [path.join(root, "studio-cms.css"), "text/css; charset=utf-8"]],
+	["/studio-cms-utils.js", [path.join(root, "studio-cms-utils.js"), "text/javascript; charset=utf-8"]],
+	["/studio-layout-manager.js", [path.join(root, "studio-layout-manager.js"), "text/javascript; charset=utf-8"]],
+	["/studio-page-manager.js", [path.join(root, "studio-page-manager.js"), "text/javascript; charset=utf-8"]],
+	["/studio-settings-manager.js", [path.join(root, "studio-settings-manager.js"), "text/javascript; charset=utf-8"]],
+	["/studio-shell.js", [path.join(root, "studio-shell.js"), "text/javascript; charset=utf-8"]],
+]);
 const port = Number(process.env.STUDIO_PORT || 4322);
 const MAX_PREVIEW_BODY_BYTES = 256 * 1024;
+const MAX_CONTENT_BODY_BYTES = 512 * 1024;
 
 let previewMarkdownRendererPromise;
 
@@ -43,7 +55,9 @@ const componentTypes = new Set([
 	"stats",
 	"calendar",
 	"music",
+	"emailSubscribe",
 	"siteInfo",
+	"advertisement",
 ]);
 const imageExtensions = new Set([
 	".avif",
@@ -54,6 +68,7 @@ const imageExtensions = new Set([
 	".svg",
 	".webp",
 ]);
+const previewMediaExtensions = new Set([".m4a", ".mp3", ".mp4", ".ogg", ".wav", ".webm"]);
 const copyablePostResourceExtensions = new Set([
 	".avif",
 	".gif",
@@ -78,6 +93,12 @@ const imageContentTypes = new Map([
 	[".png", "image/png"],
 	[".svg", "image/svg+xml"],
 	[".webp", "image/webp"],
+	[".m4a", "audio/mp4"],
+	[".mp3", "audio/mpeg"],
+	[".mp4", "video/mp4"],
+	[".ogg", "audio/ogg"],
+	[".wav", "audio/wav"],
+	[".webm", "video/webm"],
 ]);
 
 const defaultSettings = {
@@ -391,6 +412,339 @@ async function readBody(req) {
 	return JSON.parse(body);
 }
 
+async function readContentBody(req) {
+	const declaredLength = Number(req.headers["content-length"] || 0);
+	if (Number.isFinite(declaredLength) && declaredLength > MAX_CONTENT_BODY_BYTES) {
+		throw new StudioError("Content request is too large", 413);
+	}
+	const chunks = [];
+	let size = 0;
+	for await (const chunk of req) {
+		const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+		size += buffer.length;
+		if (size > MAX_CONTENT_BODY_BYTES) {
+			throw new StudioError("Content request is too large", 413);
+		}
+		chunks.push(buffer);
+	}
+	if (!chunks.length) return {};
+	try {
+		return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+	} catch {
+		throw new StudioError("Content request must be valid JSON");
+	}
+}
+
+function revisionFor(value) {
+	return createHash("sha256").update(value).digest("hex");
+}
+
+function isRecord(value) {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+async function readWidgetRegistry() {
+	const data = await readJson(widgetRegistryPath);
+	if (!Array.isArray(data)) throw new StudioError("Widget registry is invalid", 500);
+	const seen = new Set();
+	return data.map((entry) => {
+		if (!isRecord(entry)) throw new StudioError("Widget registry is invalid", 500);
+		const type = stringValue(entry.type);
+		if (!type || seen.has(type)) throw new StudioError("Widget registry contains duplicate types", 500);
+		seen.add(type);
+		return {
+			type,
+			name: stringValue(entry.name, type),
+			description: stringValue(entry.description),
+		};
+	});
+}
+
+function assetPath(value, fieldName) {
+	const raw = typeof value === "string" ? value.trim() : "";
+	if (!raw) return "";
+	if (
+		raw.includes("\\") ||
+		raw.includes("..") ||
+		/^file:/i.test(raw) ||
+		/^[a-z]:/i.test(raw)
+	) {
+		throw new StudioError(`${fieldName} must use a deployed /assets/images path`);
+	}
+	const normalized = raw.startsWith("/") ? raw : `/${raw}`;
+	if (!normalized.startsWith("/assets/images/")) {
+		throw new StudioError(`${fieldName} must use a deployed /assets/images path`);
+	}
+	return raw;
+}
+
+function optionalHttpUrl(value, fieldName, allowRelative = false) {
+	const raw = typeof value === "string" ? value.trim() : "";
+	if (!raw) return "";
+	if (/^file:/i.test(raw) || raw.includes("\\") || raw.includes("..") || /^[a-z]:/i.test(raw)) {
+		throw new StudioError(`${fieldName} is not a safe URL`);
+	}
+	if (allowRelative && raw.startsWith("/")) return raw;
+	try {
+		const url = new URL(raw);
+		if (!["http:", "https:"].includes(url.protocol)) throw new Error();
+		return url.toString();
+	} catch {
+		throw new StudioError(`${fieldName} must be an http(s) URL`);
+	}
+}
+
+function optionalEmail(value) {
+	const raw = typeof value === "string" ? value.trim() : "";
+	if (!raw) return "";
+	const email = raw.replace(/^mailto:/i, "");
+	if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+		throw new StudioError("Email address is invalid");
+	}
+	return raw;
+}
+
+function settingsLayout(settings) {
+	const layout = isRecord(settings?.layout) ? settings.layout : {};
+	return {
+		left: Array.isArray(layout.left) ? layout.left : [],
+		right: Array.isArray(layout.right) ? layout.right : [],
+		mobile: Array.isArray(layout.mobile) ? layout.mobile : [],
+	};
+}
+
+function validateLayoutInput(layout, registry) {
+	if (!isRecord(layout)) throw new StudioError("Layout data is invalid");
+	const validTypes = new Set(registry.map((widget) => widget.type));
+	const output = {};
+	for (const area of ["left", "right", "mobile"]) {
+		const source = layout[area];
+		if (!Array.isArray(source)) throw new StudioError(`${area} layout must be a list`);
+		const seen = new Set();
+		output[area] = source.map((item) => {
+			if (!isRecord(item)) throw new StudioError("Layout item is invalid");
+			const type = stringValue(item.type);
+			if (!validTypes.has(type)) throw new StudioError(`Unknown widget type: ${type || "empty"}`);
+			if (seen.has(type)) throw new StudioError(`${area} contains duplicate widget: ${type}`);
+			seen.add(type);
+			const next = { type, enable: booleanValue(item.enable, true) };
+			if (area !== "mobile") {
+				next.position = choiceValue(item.position, ["top", "sticky"], "sticky");
+			}
+			return next;
+		});
+	}
+	return output;
+}
+
+function mergeLayout(currentSettings, requestedLayout) {
+	const next = clone(currentSettings);
+	const currentLayout = settingsLayout(currentSettings);
+	next.layout = isRecord(next.layout) ? next.layout : {};
+	for (const area of ["left", "right", "mobile"]) {
+		const existing = new Map(
+			currentLayout[area]
+				.filter((item) => isRecord(item) && typeof item.type === "string")
+				.map((item) => [item.type, item]),
+		);
+		next.layout[area] = requestedLayout[area].map((item) => {
+			const original = existing.get(item.type);
+			return { ...(isRecord(original) ? original : {}), ...item };
+		});
+	}
+	return next;
+}
+
+async function getLayoutPayload() {
+	const raw = await readFile(settingsPath, "utf8");
+	const settings = JSON.parse(raw);
+	return {
+		revision: revisionFor(raw),
+		layout: settingsLayout(settings),
+		widgets: await readWidgetRegistry(),
+	};
+}
+
+async function saveLayout(input) {
+	const raw = await readFile(settingsPath, "utf8");
+	if (input?.revision && input.revision !== revisionFor(raw)) {
+		throw new StudioError("Layout changed on disk. Reload before saving.", 409);
+	}
+	const requested = validateLayoutInput(input?.layout, await readWidgetRegistry());
+	const next = mergeLayout(JSON.parse(raw), requested);
+	const serialized = `${JSON.stringify(next, null, 2)}\n`;
+	await atomicWriteFile(settingsPath, serialized);
+	return {
+		revision: revisionFor(serialized),
+		layout: settingsLayout(next),
+		widgets: await readWidgetRegistry(),
+	};
+}
+
+function readTsString(source, key, offset = 0) {
+	const match = source.slice(offset).match(new RegExp(`\\b${key}\\s*:\\s*("(?:\\\\.|[^"\\\\])*")`));
+	if (!match) throw new StudioError(`Announcement field is missing: ${key}`, 500);
+	try {
+		return JSON.parse(match[1]);
+	} catch {
+		throw new StudioError(`Announcement field is invalid: ${key}`, 500);
+	}
+}
+
+function replaceTsString(source, key, value, offset = 0, end = source.length) {
+	const before = source.slice(0, offset);
+	const segment = source.slice(offset, end);
+	const after = source.slice(end);
+	const pattern = new RegExp(`(\\b${key}\\s*:\\s*)("(?:\\\\.|[^"\\\\])*")`);
+	if (!pattern.test(segment)) throw new StudioError(`Announcement field is missing: ${key}`, 500);
+	return before + segment.replace(pattern, `$1${JSON.stringify(value)}`) + after;
+}
+
+function announcementLinkRange(source) {
+	const match = /\blink\s*:\s*\{/.exec(source);
+	if (!match) throw new StudioError("Announcement link configuration is invalid", 500);
+	const open = source.indexOf("{", match.index);
+	let depth = 0;
+	let quote = "";
+	let escaped = false;
+	for (let index = open; index < source.length; index += 1) {
+		const char = source[index];
+		if (quote) {
+			if (escaped) escaped = false;
+			else if (char === "\\") escaped = true;
+			else if (char === quote) quote = "";
+			continue;
+		}
+		if (char === '"' || char === "'") { quote = char; continue; }
+		if (char === "{") depth += 1;
+		if (char === "}") {
+			depth -= 1;
+			if (depth === 0) return { start: open, end: index + 1 };
+		}
+	}
+	throw new StudioError("Announcement link configuration is invalid", 500);
+}
+
+function announcementData(source, settings) {
+	const link = announcementLinkRange(source);
+	const layout = settingsLayout(settings);
+	const visible = Object.values(layout).some((items) =>
+		items.some((item) => item?.type === "announcement" && item?.enable !== false),
+	);
+	return {
+		title: readTsString(source, "title"),
+		content: readTsString(source, "content"),
+		buttonText: readTsString(source, "text", link.start),
+		buttonUrl: readTsString(source, "url", link.start),
+		visible,
+	};
+}
+
+function replaceAnnouncementVisibility(settings, visible) {
+	const next = clone(settings);
+	const layout = settingsLayout(next);
+	next.layout = isRecord(next.layout) ? next.layout : {};
+	for (const area of ["left", "right", "mobile"]) {
+		next.layout[area] = layout[area].map((item) =>
+			item?.type === "announcement" ? { ...item, enable: Boolean(visible) } : item,
+		);
+	}
+	return next;
+}
+
+async function getContentSettings() {
+	const [settingsRaw, announcementRaw] = await Promise.all([
+		readFile(settingsPath, "utf8"),
+		readFile(announcementPath, "utf8"),
+	]);
+	const settings = JSON.parse(settingsRaw);
+	return {
+		revision: revisionFor(`${settingsRaw}\n${announcementRaw}`),
+		settings: {
+			site: {
+				title: String(settings.site?.title || ""),
+				subtitle: String(settings.site?.subtitle || ""),
+				description: String(settings.site?.description || ""),
+			},
+			profile: {
+				name: String(settings.profile?.name || ""),
+				bio: String(settings.profile?.bio || ""),
+				avatar: String(settings.profile?.avatar || ""),
+				github: String(settings.profile?.github || ""),
+				email: String(settings.profile?.email || ""),
+			},
+			announcement: announcementData(announcementRaw, settings),
+		},
+	};
+}
+
+async function saveContentSettings(input) {
+	const [settingsRaw, announcementRaw] = await Promise.all([
+		readFile(settingsPath, "utf8"),
+		readFile(announcementPath, "utf8"),
+	]);
+	if (input?.revision && input.revision !== revisionFor(`${settingsRaw}\n${announcementRaw}`)) {
+		throw new StudioError("Settings changed on disk. Reload before saving.", 409);
+	}
+	if (!isRecord(input?.settings)) throw new StudioError("Settings data is invalid");
+	const current = JSON.parse(settingsRaw);
+	const next = clone(current);
+	const patch = input.settings;
+	if (isRecord(patch.site)) {
+		next.site = { ...(isRecord(next.site) ? next.site : {}) };
+		for (const key of ["title", "subtitle", "description"]) {
+			if (Object.hasOwn(patch.site, key)) next.site[key] = String(patch.site[key] ?? "").trim();
+		}
+		if (!next.site.title) throw new StudioError("Site title is required");
+	}
+	if (isRecord(patch.profile)) {
+		next.profile = { ...(isRecord(next.profile) ? next.profile : {}) };
+		if (Object.hasOwn(patch.profile, "name")) next.profile.name = String(patch.profile.name ?? "").trim();
+		if (Object.hasOwn(patch.profile, "bio")) next.profile.bio = String(patch.profile.bio ?? "").trim();
+		if (Object.hasOwn(patch.profile, "avatar")) next.profile.avatar = assetPath(patch.profile.avatar, "Avatar path");
+		if (Object.hasOwn(patch.profile, "github")) next.profile.github = optionalHttpUrl(patch.profile.github, "GitHub URL");
+		if (Object.hasOwn(patch.profile, "email")) next.profile.email = optionalEmail(patch.profile.email);
+	}
+	let nextAnnouncement = announcementRaw;
+	if (isRecord(patch.announcement)) {
+		if (Object.hasOwn(patch.announcement, "title")) nextAnnouncement = replaceTsString(nextAnnouncement, "title", String(patch.announcement.title ?? ""));
+		if (Object.hasOwn(patch.announcement, "content")) nextAnnouncement = replaceTsString(nextAnnouncement, "content", String(patch.announcement.content ?? ""));
+		const freshLink = announcementLinkRange(nextAnnouncement);
+		if (Object.hasOwn(patch.announcement, "buttonText")) nextAnnouncement = replaceTsString(nextAnnouncement, "text", String(patch.announcement.buttonText ?? ""), freshLink.start, freshLink.end);
+		if (Object.hasOwn(patch.announcement, "buttonUrl")) nextAnnouncement = replaceTsString(nextAnnouncement, "url", optionalHttpUrl(patch.announcement.buttonUrl, "Announcement link", true), freshLink.start, freshLink.end);
+		if (Object.hasOwn(patch.announcement, "visible")) {
+			Object.assign(next, replaceAnnouncementVisibility(next, Boolean(patch.announcement.visible)));
+		}
+	}
+	const nextSettingsRaw = `${JSON.stringify(next, null, 2)}\n`;
+	await atomicWriteFile(settingsPath, nextSettingsRaw);
+	try {
+		if (nextAnnouncement !== announcementRaw) await atomicWriteFile(announcementPath, nextAnnouncement);
+	} catch (error) {
+		await atomicWriteFile(settingsPath, settingsRaw).catch(() => {});
+		throw error;
+	}
+	return getContentSettings();
+}
+
+async function getAboutPage() {
+	const content = await readFile(aboutPath, "utf8");
+	return { content, revision: revisionFor(content) };
+}
+
+async function saveAboutPage(input) {
+	if (typeof input?.content !== "string") throw new StudioError("About content is required");
+	if (Buffer.byteLength(input.content, "utf8") > MAX_CONTENT_BODY_BYTES) {
+		throw new StudioError("About page is too large", 413);
+	}
+	const current = await readFile(aboutPath, "utf8");
+	if (input?.revision && input.revision !== revisionFor(current)) {
+		throw new StudioError("About page changed on disk. Reload before saving.", 409);
+	}
+	await atomicWriteFile(aboutPath, input.content);
+	return getAboutPage();
+}
+
 async function readPreviewBody(req) {
 	const declaredLength = Number(req.headers["content-length"] || 0);
 	if (Number.isFinite(declaredLength) && declaredLength > MAX_PREVIEW_BODY_BYTES) {
@@ -441,6 +795,10 @@ function previewImageSource(source) {
 	return "";
 }
 
+function previewMediaSource(source) {
+	return previewImageSource(source);
+}
+
 function articleImagePath(value) {
 	const imagePath = stringValue(value);
 	if (!imagePath) return "";
@@ -476,6 +834,7 @@ function previewSanitizer() {
 	return {
 		allowedTags: [
 			"a",
+			"audio",
 			"blockquote",
 			"br",
 			"code",
@@ -502,11 +861,16 @@ function previewSanitizer() {
 			"thead",
 			"tr",
 			"ul",
+			"video",
+			"source",
 		],
 		allowedAttributes: {
 			a: ["href", "rel", "title"],
 			code: ["class"],
 			img: ["src", "alt", "title", "width", "height", "loading"],
+			audio: ["src", "controls", "preload"],
+			video: ["src", "controls", "preload", "poster", "width", "height"],
+			source: ["src", "type"],
 			ol: ["start"],
 			th: ["align"],
 			td: ["align"],
@@ -527,8 +891,25 @@ function previewSanitizer() {
 				tagName,
 				attribs: { ...attribs, src: previewImageSource(attribs.src) },
 			}),
+			audio: (tagName, attribs) => ({
+				tagName,
+				attribs: { ...attribs, src: previewMediaSource(attribs.src) },
+			}),
+			video: (tagName, attribs) => ({
+				tagName,
+				attribs: {
+					...attribs,
+					src: previewMediaSource(attribs.src),
+					poster: previewImageSource(attribs.poster),
+				},
+			}),
+			source: (tagName, attribs) => ({
+				tagName,
+				attribs: { ...attribs, src: previewMediaSource(attribs.src) },
+			}),
 		},
-		exclusiveFilter: (frame) => frame.tag === "img" && !frame.attribs.src,
+		exclusiveFilter: (frame) =>
+			["img", "audio", "video", "source"].includes(frame.tag) && !frame.attribs.src,
 	};
 }
 
@@ -565,7 +946,9 @@ async function resolvePreviewAsset(urlPath) {
 		throw new StudioError("预览资源路径越界");
 	}
 	const ext = path.extname(fullPath).toLowerCase();
-	if (!imageExtensions.has(ext)) throw new StudioError("预览只允许读取图片资源");
+	if (!imageExtensions.has(ext) && !previewMediaExtensions.has(ext)) {
+		throw new StudioError("Preview only allows image, audio, and video assets");
+	}
 	const info = await lstat(fullPath).catch(() => null);
 	if (!info?.isFile() || info.isSymbolicLink()) throw new StudioError("预览图片不存在", 404);
 	return { fullPath, ext };
@@ -1418,6 +1801,14 @@ const server = createServer(async (req, res) => {
 			});
 			return;
 		}
+		if (req.method === "GET" && studioAssets.has(url.pathname)) {
+			const [file, contentType] = studioAssets.get(url.pathname);
+			send(res, 200, await readFile(file, "utf8"), {
+				"content-type": contentType,
+				"cache-control": "no-store",
+			});
+			return;
+		}
 		if (req.method === "GET" && url.pathname.startsWith("/studio-assets/")) {
 			const { fullPath, ext } = await resolvePreviewAsset(url.pathname);
 			sendBuffer(
@@ -1430,6 +1821,30 @@ const server = createServer(async (req, res) => {
 		}
 		if (req.method === "GET" && url.pathname === "/api/settings") {
 			send(res, 200, normalizeSettings(await readJson(settingsPath)));
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/layout") {
+			send(res, 200, await getLayoutPayload());
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/layout") {
+			send(res, 200, await saveLayout(await readContentBody(req)));
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/pages/about") {
+			send(res, 200, await getAboutPage());
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/pages/about") {
+			send(res, 200, await saveAboutPage(await readContentBody(req)));
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/content-settings") {
+			send(res, 200, await getContentSettings());
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/content-settings") {
+			send(res, 200, await saveContentSettings(await readContentBody(req)));
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/images") {

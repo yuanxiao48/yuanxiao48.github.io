@@ -5,6 +5,7 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>博客操作台</title>
 		<link rel="stylesheet" href="./studio-editor.css" />
+		<link rel="stylesheet" href="./studio-cms.css" />
 		<style>
 			:root {
 				color-scheme: dark;
@@ -536,8 +537,46 @@
 					<button class="tab" data-tab="preview" type="button">预览</button>
 					<button class="tab" data-tab="posts" type="button">文章</button>
 				</nav>
+				<nav class="studio4a-nav" aria-label="Studio modules">
+					<button class="studio4a-nav-item active" data-studio-module="overview" type="button">概览</button>
+					<button class="studio4a-nav-item" data-studio-module="posts" type="button">文章</button>
+					<button class="studio4a-nav-item" data-studio-module="media" type="button">媒体</button>
+					<button class="studio4a-nav-item" data-studio-module="albums" type="button">相册</button>
+					<button class="studio4a-nav-item" data-studio-module="pages" type="button">页面</button>
+					<button class="studio4a-nav-item" data-studio-module="layout" type="button">布局</button>
+					<button class="studio4a-nav-item" data-studio-module="comments" type="button">评论与统计</button>
+					<button class="studio4a-nav-item" data-studio-module="settings" type="button">设置</button>
+					<button class="studio4a-nav-item" data-studio-module="trash" type="button">回收站</button>
+				</nav>
 
-				<section>
+				<section class="studio4a-main">
+					<div id="studio4a-modules" class="studio4a-modules">
+						<section class="studio4a-module" data-studio-module-panel="overview">
+							<div class="studio4a-module-header"><div><h2>概览</h2><p>从这里进入写作、页面和侧栏布局。</p></div></div>
+							<div class="studio4a-overview-grid">
+								<button type="button" data-studio-go="posts"><strong>文章工作区</strong><span>继续使用现有 Markdown 编辑、草稿保护和预览。</span></button>
+								<button type="button" data-studio-go="pages"><strong>关于我</strong><span>编辑独立页面内容，保存前只保留本地草稿。</span></button>
+								<button type="button" data-studio-go="layout"><strong>侧栏布局</strong><span>调整组件顺序、区域、状态与移动端顺序。</span></button>
+								<button type="button" data-studio-go="settings"><strong>资料与公告</strong><span>更新站点资料、个人资料和公告。</span></button>
+							</div>
+						</section>
+						<section class="studio4a-module hidden" data-studio-module-panel="pages">
+							<div class="studio4a-module-header"><div><h2>页面</h2><p>独立页面内容不会自动写入磁盘，点击保存后才会更新。</p></div><span id="aboutStatus" class="studio4a-save-status">正在读取</span></div>
+							<div class="studio4a-page-workspace"><div class="studio4a-page-editor"><label for="aboutContent">关于我</label><textarea id="aboutContent" spellcheck="true" placeholder="开始写关于我页面…"></textarea><div class="studio4a-editor-footer"><span id="aboutStats">字符 0 · 中文 0 · 英文词 0</span><div><button id="aboutDiscard" class="btn" type="button">恢复磁盘版本</button><button id="aboutSave" class="btn primary" type="button">保存关于我</button></div></div></div><div class="studio4a-page-preview"><div class="studio4a-preview-heading"><strong>实时预览</strong><span>预览会清理不安全内容；最终页面仍会应用站点排版。</span></div><div id="aboutPreview" class="studio4a-markdown-preview"><p>正在准备预览…</p></div></div></div>
+						</section>
+						<section class="studio4a-module hidden" data-studio-module-panel="layout">
+							<div class="studio4a-module-header"><div><h2>布局</h2><p>拖拽、上移下移、移动区域和开关都会保留其它设置字段。</p></div><div><span id="layoutStatus" class="studio4a-save-status">正在读取</span><button id="layoutSave" class="btn primary" type="button">保存布局</button></div></div>
+							<div class="studio4a-layout-zones"><section class="studio4a-layout-zone" data-layout-zone="left"><header><h3>桌面左侧栏</h3><select aria-label="添加到桌面左侧栏" data-layout-add="left"></select></header><div class="studio4a-widget-list" data-layout-list="left"></div></section><section class="studio4a-layout-zone" data-layout-zone="right"><header><h3>桌面右侧栏</h3><select aria-label="添加到桌面右侧栏" data-layout-add="right"></select></header><div class="studio4a-widget-list" data-layout-list="right"></div></section><section class="studio4a-layout-zone" data-layout-zone="mobile"><header><h3>移动端侧栏</h3><select aria-label="添加到移动端侧栏" data-layout-add="mobile"></select></header><div class="studio4a-widget-list" data-layout-list="mobile"></div></section></div>
+						</section>
+						<section class="studio4a-module hidden" data-studio-module-panel="settings">
+							<div class="studio4a-module-header"><div><h2>设置</h2><p>只保存当前填写的站点、个人资料与公告字段。</p></div><div><span id="contentSettingsStatus" class="studio4a-save-status">正在读取</span><button id="contentSettingsSave" class="btn primary" type="button">保存资料与公告</button></div></div>
+							<div class="studio4a-settings-grid"><section class="studio4a-settings-section"><h3>站点</h3><label>标题<input id="cmsSiteTitle" /></label><label>副标题<input id="cmsSiteSubtitle" /></label><label>网站描述<textarea id="cmsSiteDescription"></textarea></label></section><section class="studio4a-settings-section"><h3>个人资料</h3><label>显示名称<input id="cmsProfileName" /></label><label>简介<textarea id="cmsProfileBio"></textarea></label><label>头像路径<div class="studio4a-inline-field"><input id="cmsProfileAvatar" /><button id="cmsPickAvatar" class="btn" type="button">选择头像</button></div></label><div id="cmsAvatarPreview" class="studio4a-avatar-preview"></div><label>GitHub 地址<input id="cmsProfileGithub" inputmode="url" /></label><label>邮箱<input id="cmsProfileEmail" type="email" /></label></section><section class="studio4a-settings-section"><h3>公告</h3><label class="studio4a-check"><input id="cmsAnnouncementVisible" type="checkbox" />显示公告</label><label>公告标题<input id="cmsAnnouncementTitle" /></label><label>公告正文<textarea id="cmsAnnouncementContent"></textarea></label><label>按钮文字<input id="cmsAnnouncementButtonText" /></label><label>按钮链接<input id="cmsAnnouncementButtonUrl" inputmode="url" /></label></section></div>
+						</section>
+						<section class="studio4a-module hidden" data-studio-module-panel="media"><div class="studio4a-placeholder"><h2>媒体</h2><p>图片库已在文章工作区可用；独立媒体管理将在后续阶段加入。</p></div></section>
+						<section class="studio4a-module hidden" data-studio-module-panel="albums"><div class="studio4a-placeholder"><h2>相册</h2><p>相册管理将在后续阶段加入。</p></div></section>
+						<section class="studio4a-module hidden" data-studio-module-panel="comments"><div class="studio4a-placeholder"><h2>评论与统计</h2><p>评论后端与真实统计将在后续阶段接入。</p></div></section>
+						<section class="studio4a-module hidden" data-studio-module-panel="posts"><div id="studio4a-posts-mount"></div></section>
+					</div>
 					<form id="settingsForm">
 						<div class="panel tab-panel" data-panel="site">
 							<div class="panel-header">
@@ -1098,6 +1137,8 @@
 			let posts = [];
 			let trashPosts = [];
 			let postView = "articles";
+			let postListState = "idle";
+			let postListError = "";
 
 			const blockLabels = {
 				profile: "个人卡片",
@@ -1512,6 +1553,18 @@
 					renderTrashList();
 					return;
 				}
+				if (postListState === "loading") {
+					list.innerHTML = `<div class="empty-state">正在读取文章列表…</div>`;
+					return;
+				}
+				if (postListState === "error") {
+					list.innerHTML = `<div class="empty-state">读取文章失败：${escapeHtml(postListError || "未知错误")}<br><button class="btn small" data-post-action="reload" type="button">重新加载</button></div>`;
+					return;
+				}
+				if (!posts.length) {
+					list.innerHTML = `<div class="empty-state">暂无文章。</div>`;
+					return;
+				}
 				const visiblePosts = filteredPosts();
 				if (!visiblePosts.length) {
 					list.innerHTML = `<div class="empty-state">没有符合当前搜索或筛选条件的文章。</div>`;
@@ -1569,11 +1622,27 @@
 			}
 
 			async function loadPosts() {
-				const res = await fetch("/api/posts");
-				if (!res.ok) throw new Error("读取文章失败");
-				posts = await res.json();
-				updatePostCategories();
+				postListState = "loading";
+				postListError = "";
 				renderPostList();
+				try {
+					const res = await fetch("/api/posts");
+					if (!res.ok) {
+						const error = await res.json().catch(() => ({}));
+						throw new Error(error.error || "读取文章失败");
+					}
+					const nextPosts = await res.json();
+					if (!Array.isArray(nextPosts)) throw new Error("文章列表返回格式无效");
+					posts = nextPosts;
+					postListState = "ready";
+					updatePostCategories();
+					renderPostList();
+				} catch (error) {
+					postListState = "error";
+					postListError = error.message || "读取文章失败";
+					renderPostList();
+					throw error;
+				}
 			}
 
 			async function loadTrash() {
@@ -1816,6 +1885,9 @@
 					if (postButton.dataset.postAction === "restore") {
 						restorePost(postButton.dataset.trashPath, title).catch((err) => setStatus(err.message, "bad"));
 					}
+					if (postButton.dataset.postAction === "reload") {
+						(postView === "trash" ? loadTrash() : loadPosts()).catch((err) => setStatus(err.message, "bad"));
+					}
 					return;
 				}
 
@@ -1916,11 +1988,17 @@
 			document.querySelector("#refreshPosts").addEventListener("click", () => {
 				(postView === "trash" ? loadTrash() : loadPosts()).catch((err) => setStatus(err.message, "bad"));
 			});
+			window.StudioPosts = {
+				show: (view = "articles") => switchPostView(view),
+				reload: () => (postView === "trash" ? loadTrash() : loadPosts()),
+			};
 
 			loadSettings().catch((err) => setStatus(err.message, "bad"));
 		</script>
+		<script src="./studio-editor.js"></script>
 		<script>
 			(async () => {
+				if (window.StudioEditor) return;
 				try {
 					const response = await fetch("./studio-editor.js", { cache: "no-store" });
 					if (!response.ok) throw new Error("无法读取编辑器脚本");
@@ -1936,5 +2014,6 @@
 				}
 			})();
 		</script>
+		<script type="module" src="./studio-shell.js"></script>
 	</body>
 </html>

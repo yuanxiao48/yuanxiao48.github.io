@@ -5,6 +5,7 @@ import type {
 	WidgetComponentType,
 } from "../types/sidebarConfig";
 import userSettings from "./userSettings.json";
+import { widgetTypes } from "./widgetRegistry";
 
 type Position = WidgetComponentConfig["position"];
 
@@ -27,6 +28,10 @@ type LayoutSettings = {
 
 const settings = userSettings as LayoutSettings;
 const musicVisible = settings.music?.showInSidebar !== false;
+
+function isKnownWidget(item: LayoutItem): item is LayoutItem {
+	return widgetTypes.has(item.type);
+}
 
 const fallbackLayout: Required<NonNullable<LayoutSettings["layout"]>> = {
 	left: [
@@ -125,13 +130,17 @@ export const sidebarLayoutConfig: SidebarLayoutConfig = {
 	position: "both",
 	tabletSidebar: "left",
 	showBothSidebarsOnPostPage: true,
-	leftComponents: (layout.left?.length ? layout.left : fallbackLayout.left).map(
-		desktopComponent,
-	),
+	leftComponents: (layout.left?.length ? layout.left : fallbackLayout.left)
+		.filter(isKnownWidget)
+		.map(desktopComponent),
 	rightComponents: (
 		layout.right?.length ? layout.right : fallbackLayout.right
-	).map(desktopComponent),
+	)
+		.filter(isKnownWidget)
+		.map(desktopComponent),
 	mobileBottomComponents: (
 		layout.mobile?.length ? layout.mobile : fallbackLayout.mobile
-	).map(mobileComponent),
+	)
+		.filter(isKnownWidget)
+		.map(mobileComponent),
 };

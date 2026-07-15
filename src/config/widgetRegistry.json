@@ -1,0 +1,13 @@
+[
+  { "type": "profile", "name": "个人资料", "description": "头像、简介和常用链接。" },
+  { "type": "announcement", "name": "公告", "description": "在侧栏显示一条站点公告。" },
+  { "type": "categories", "name": "分类", "description": "按分类浏览文章。" },
+  { "type": "tags", "name": "标签", "description": "展示常用标签。" },
+  { "type": "sidebarToc", "name": "文章目录", "description": "在文章页显示当前目录。" },
+  { "type": "advertisement", "name": "推广卡片", "description": "可配置的侧栏推广内容。" },
+  { "type": "stats", "name": "站点统计", "description": "文章、运行时长和站点统计。" },
+  { "type": "calendar", "name": "日历", "description": "文章日历与热力图。" },
+  { "type": "music", "name": "音乐", "description": "侧栏嵌入式音乐播放器。" },
+  { "type": "emailSubscribe", "name": "订阅元枭的来信", "description": "follow.it 邮件订阅表单。" },
+  { "type": "siteInfo", "name": "站点信息", "description": "构建与站点运行信息。" }
+]

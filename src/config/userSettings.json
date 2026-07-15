@@ -91,6 +91,11 @@
         "position": "top"
       },
       {
+        "type": "emailSubscribe",
+        "enable": true,
+        "position": "sticky"
+      },
+      {
         "type": "announcement",
         "enable": true,
         "position": "top"
@@ -144,11 +149,11 @@
       },
       {
         "type": "stats",
-        "enable": true
+        "enable": false
       },
       {
         "type": "announcement",
-        "enable": true
+        "enable": false
       },
       {
         "type": "categories",
@@ -156,7 +161,7 @@
       },
       {
         "type": "tags",
-        "enable": true
+        "enable": false
       }
     ]
   }

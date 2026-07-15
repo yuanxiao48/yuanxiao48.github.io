@@ -66,6 +66,7 @@ let imagePickerMode = "insert";
 let imagePickerImages = [];
 let imagePickerSelected = null;
 let imagePickerUploading = false;
+let externalImageSelection = null;
 let legacyPublished = "";
 let newDraftPublishedIsAuto = true;
 
@@ -552,11 +553,11 @@ async function loadImagePickerImages() {
 
 function openImagePicker(mode) {
 	if (!imagePicker) return;
-	imagePickerMode = mode === "cover" ? "cover" : "insert";
+	imagePickerMode = mode === "cover" || mode === "external" ? mode : "insert";
 	imagePickerSelected = null;
-	if (imagePickerTitle) imagePickerTitle.textContent = imagePickerMode === "cover" ? "选择文章封面" : "插入正文图片";
+	if (imagePickerTitle) imagePickerTitle.textContent = imagePickerMode === "cover" ? "选择文章封面" : imagePickerMode === "external" ? "选择头像" : "插入正文图片";
 	if (imagePickerConfirm) {
-		imagePickerConfirm.textContent = imagePickerMode === "cover" ? "设为封面" : "插入正文";
+		imagePickerConfirm.textContent = imagePickerMode === "cover" ? "设为封面" : imagePickerMode === "external" ? "使用这张图片" : "插入正文";
 		imagePickerConfirm.disabled = true;
 	}
 	if (imagePickerAltField) imagePickerAltField.classList.toggle("hidden", imagePickerMode !== "insert");
@@ -575,6 +576,7 @@ function closeImagePicker() {
 	}
 	imagePicker.classList.add("hidden");
 	imagePicker.setAttribute("aria-hidden", "true");
+	externalImageSelection = null;
 }
 
 function escapeMarkdownAlt(value) {
@@ -654,6 +656,7 @@ async function uploadPickerImage() {
 function confirmImagePickerSelection() {
 	if (!imagePickerSelected) return;
 	if (imagePickerMode === "cover") setCoverImage(imagePickerSelected.path);
+	else if (imagePickerMode === "external") externalImageSelection?.(imagePickerSelected.path);
 	else insertMarkdownImage(imagePickerSelected.path, imagePickerAlt?.value || selectedImageName(imagePickerSelected));
 	closeImagePicker();
 }
@@ -1068,6 +1071,12 @@ async function initialize() {
 		discardChanges,
 		isDirty,
 		formatTimestamp,
+	};
+	window.StudioImagePicker = {
+		open(onSelect) {
+			externalImageSelection = typeof onSelect === "function" ? onSelect : null;
+			openImagePicker("external");
+		},
 	};
 	await beginNewDraft({ resume: true });
 	window.dispatchEvent(new CustomEvent("studio-editor-ready"));
