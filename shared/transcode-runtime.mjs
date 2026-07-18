@@ -124,9 +124,39 @@ export function createStudioShutdownPreparation({ queue, recoverPending = async 
 		acceptingWrites: true,
 		queueClosed: false,
 		startedAt: null,
-		reason: null,
+		activeStopRequested: false,
+		pendingRecoveryStarted: false,
+		pendingRecoveryCompleted: false,
+		httpCloseStarted: false,
+		httpClosed: false,
+		degraded: false,
+		degradedCodes: [],
+		completed: false,
 		preparationPromise: null,
 	};
+
+	const markDegraded = (code) => {
+		if (typeof code !== "string" || !/^[A-Z0-9_]+$/.test(code)) return false;
+		state.degraded = true;
+		if (!state.degradedCodes.includes(code)) state.degradedCodes.push(code);
+		return true;
+	};
+
+	const snapshot = () => Object.freeze({
+		started: state.started,
+		acceptingWrites: state.acceptingWrites,
+		queueClosed: state.queueClosed,
+		startedAt: state.startedAt,
+		activeStopRequested: state.activeStopRequested,
+		pendingRecoveryStarted: state.pendingRecoveryStarted,
+		pendingRecoveryCompleted: state.pendingRecoveryCompleted,
+		httpCloseStarted: state.httpCloseStarted,
+		httpClosed: state.httpClosed,
+		degraded: state.degraded,
+		degradedCodes: Object.freeze([...state.degradedCodes]),
+		completed: state.completed,
+		preparationCompleted: state.preparationPromise !== null && state.pendingRecoveryCompleted,
+	});
 
 	const begin = () => {
 		if (state.preparationPromise) return state.preparationPromise;
@@ -140,15 +170,21 @@ export function createStudioShutdownPreparation({ queue, recoverPending = async 
 		catch { activeShutdown = Promise.reject(new Error("Active transcode shutdown preparation failed")); }
 		const active = Promise.resolve(activeShutdown)
 			.catch(() => ({ ok: false, code: "TRANSCODE_SHUTDOWN_ACTIVE_PREPARATION_FAILED" }));
+		state.pendingRecoveryStarted = true;
 		const recovery = Promise.resolve()
 			.then(() => recoverPending(queueResult.pendingJobIds))
 			.catch(() => ({ ok: false, code: "TRANSCODE_SHUTDOWN_PENDING_RECOVERY_FAILED" }));
-		state.preparationPromise = Promise.all([active, recovery]).then(([activeResult, recoveryResult]) => ({
-			ok: activeResult?.ok !== false && recoveryResult?.ok !== false,
-			queue: queueResult,
-			active: activeResult,
-			recovery: recoveryResult,
-		}));
+		state.preparationPromise = Promise.all([active, recovery]).then(([activeResult, recoveryResult]) => {
+			state.pendingRecoveryCompleted = true;
+			if (activeResult?.ok === false) markDegraded(activeResult.code || "TRANSCODE_SHUTDOWN_ACTIVE_PREPARATION_FAILED");
+			if (recoveryResult?.ok === false) markDegraded(recoveryResult.code || "TRANSCODE_SHUTDOWN_PENDING_RECOVERY_FAILED");
+			return {
+				ok: activeResult?.ok !== false && recoveryResult?.ok !== false,
+				queue: queueResult,
+				active: activeResult,
+				recovery: recoveryResult,
+			};
+		});
 		return state.preparationPromise;
 	};
 
@@ -157,14 +193,25 @@ export function createStudioShutdownPreparation({ queue, recoverPending = async 
 		isAcceptingWrites() { return state.acceptingWrites; },
 		isStarted() { return state.started; },
 		isQueueClosed() { return state.queueClosed; },
-		snapshot() {
-			return {
-				started: state.started,
-				acceptingWrites: state.acceptingWrites,
-				queueClosed: state.queueClosed,
-				startedAt: state.startedAt,
-			};
+		markActiveStopRequested() {
+			if (state.activeStopRequested) return false;
+			state.activeStopRequested = true;
+			return true;
 		},
+		markHttpCloseStarted() {
+			if (state.httpCloseStarted) return false;
+			state.httpCloseStarted = true;
+			return true;
+		},
+		markHttpClosed() {
+			if (state.httpClosed) return false;
+			state.httpClosed = true;
+			return true;
+		},
+		markDegraded,
+		isHttpClosed() { return state.httpClosed; },
+		isCompleted() { return state.completed; },
+		snapshot,
 	});
 }
 

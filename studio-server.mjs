@@ -2793,7 +2793,10 @@ async function recoverQueuedTranscodeJobsForShutdown(pendingJobIds) {
 }
 
 async function persistActiveTranscodeShutdownInterruption(id, attempt, record) {
-	const update = (async () => {
+	const update = withTranscodeJobOperation(id, "TRANSCODE_SHUTDOWN_INTENT_PERSIST_FAILED", async () => {
+		if (record && (managedTranscodeProcesses.get(id) !== record || record.attempt !== attempt)) {
+			return { ok: true, persisted: false, stale: true };
+		}
 		const task = await readTranscodeJob(id);
 		if (task.job.runtime?.attempt !== attempt || isTerminalTranscodeState(task.job.state)) return { ok: true, persisted: false, terminal: true };
 		if (!["transcoding", "cancelling", "validating-output"].includes(task.job.state)) return { ok: true, persisted: false, state: task.job.state };
@@ -2811,7 +2814,7 @@ async function persistActiveTranscodeShutdownInterruption(id, attempt, record) {
 			await writeTranscodeJob(task.directory, task.job);
 		}
 		return { ok: true, persisted: true, state: task.job.state };
-	})();
+	});
 	if (!record) return update;
 	const trackedUpdate = update.finally(() => {
 		if (record.statusUpdatePromise === trackedUpdate) record.statusUpdatePromise = null;
@@ -2823,11 +2826,21 @@ async function persistActiveTranscodeShutdownInterruption(id, attempt, record) {
 async function requestActiveTranscodeShutdownIntent() {
 	const activeId = transcodeQueue.snapshot().activeId;
 	if (!activeId) return { ok: true, active: false };
+	studioShutdownPreparation.markActiveStopRequested();
+	const initialRecord = managedTranscodeProcesses.get(activeId);
+	let initialRequest = null;
+	if (initialRecord && initialRecord.jobId === activeId && !initialRecord.finalizePromise && !initialRecord.completionCommitted) {
+		initialRequest = managedTranscodeProcesses.requestShutdown(activeId, initialRecord.attempt);
+		if (initialRequest?.record?.child && !initialRequest.record.processExitConfirmed && !initialRequest.completionCommitInProgress) {
+			requestManagedTranscodeStop(activeId, initialRecord.attempt, initialRequest.record, { intent: "shutdown" }).catch(() => {});
+		}
+	}
 	let task;
 	try {
 		task = await readTranscodeJob(activeId);
 	} catch {
-		return { ok: false, code: "TRANSCODE_SHUTDOWN_ACTIVE_PREPARATION_FAILED" };
+		studioShutdownPreparation.markDegraded("TRANSCODE_SHUTDOWN_ACTIVE_LOOKUP_FAILED");
+		return { ok: false, code: "TRANSCODE_SHUTDOWN_ACTIVE_LOOKUP_FAILED" };
 	}
 	if (isTerminalTranscodeState(task.job.state) || task.job.state === "ready") return { ok: true, active: true, requested: false, state: task.job.state };
 	if (task.job.state === "queued") {
@@ -2846,7 +2859,10 @@ async function requestActiveTranscodeShutdownIntent() {
 		});
 	}
 	const attempt = task.job.runtime?.attempt;
-	const request = managedTranscodeProcesses.requestShutdown(activeId, attempt);
+	const currentRecord = managedTranscodeProcesses.get(activeId);
+	const request = initialRequest?.record === currentRecord && initialRequest.record?.attempt === attempt
+		? initialRequest
+		: managedTranscodeProcesses.requestShutdown(activeId, attempt);
 	if (!request) return { ok: false, code: "TRANSCODE_SHUTDOWN_ACTIVE_PREPARATION_FAILED" };
 	if (request.completionCommitted) return { ok: true, active: true, requested: false, completed: true };
 	// Do not race an in-flight completed manifest replacement with a second
@@ -2858,9 +2874,10 @@ async function requestActiveTranscodeShutdownIntent() {
 			await persistActiveTranscodeShutdownInterruption(activeId, attempt, request.record);
 		} catch {
 			persistenceFailed = true;
+			studioShutdownPreparation.markDegraded("TRANSCODE_SHUTDOWN_INTENT_PERSIST_FAILED");
 		}
 	}
-	if (request.record?.child && !request.record.processExitConfirmed) {
+	if (request.record?.child && !request.record.processExitConfirmed && !request.completionCommitInProgress) {
 		await requestManagedTranscodeStop(activeId, attempt, request.record, { intent: "shutdown" }).catch(() => {});
 	}
 	return {
@@ -4547,8 +4564,7 @@ const server = createServer(async (req, res) => {
 });
 
 server.on("close", () => {
-	transcodeProgressPersistence.flushAll().catch((error) => console.warn("Studio transcode progress flush skipped:", error.message));
-	managedTranscodeProcesses.clear();
+	studioShutdownPreparation.markHttpClosed();
 });
 
 cleanupStaleMediaTemps()
