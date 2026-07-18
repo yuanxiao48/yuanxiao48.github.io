@@ -14,13 +14,14 @@ export function createTranscodeQueue({ runJob, onJobError = () => {} }) {
 	const known = new Set();
 	let activeId = null;
 	let scheduling = false;
+	let closed = false;
 
 	const schedule = () => {
-		if (scheduling || activeId || !pending.length) return;
+		if (closed || scheduling || activeId || !pending.length) return;
 		scheduling = true;
 		queueMicrotask(async () => {
 			scheduling = false;
-			if (activeId || !pending.length) return;
+			if (closed || activeId || !pending.length) return;
 			const jobId = pending.shift();
 			activeId = jobId;
 			try {
@@ -30,13 +31,14 @@ export function createTranscodeQueue({ runJob, onJobError = () => {} }) {
 			} finally {
 				known.delete(jobId);
 				activeId = null;
-				schedule();
+				if (!closed) schedule();
 			}
 		});
 	};
 
 	return Object.freeze({
 		enqueue(jobId) {
+			if (closed) throw queueError("TRANSCODE_QUEUE_CLOSED", "The transcode queue is closed");
 			if (!jobId || known.has(jobId)) throw queueError("TRANSCODE_QUEUE_DUPLICATE", "This transcode task is already queued or running");
 			known.add(jobId);
 			pending.push(jobId);
@@ -62,11 +64,106 @@ export function createTranscodeQueue({ runJob, onJobError = () => {} }) {
 			return this.getQueuePosition(jobId);
 		},
 		has(jobId) { return known.has(jobId); },
+		isClosed() { return closed; },
+		pendingCount() { return pending.length; },
+		close() {
+			if (closed) return { closed: true, alreadyClosed: true, pendingJobIds: [] };
+			closed = true;
+			const pendingJobIds = pending.splice(0);
+			for (const jobId of pendingJobIds) known.delete(jobId);
+			return { closed: true, alreadyClosed: false, pendingJobIds };
+		},
 		snapshot() {
-			return { activeId, pending: [...pending] };
+			return { closed, activeId, pending: [...pending] };
 		},
 		async idle() {
 			while (activeId || pending.length || scheduling) await new Promise((resolve) => setTimeout(resolve, 0));
+		},
+	});
+}
+
+export function isStudioApiWriteRequest({ method, pathname }) {
+	return typeof pathname === "string"
+		&& pathname.startsWith("/api/")
+		&& ["POST", "PUT", "PATCH", "DELETE"].includes(String(method || "").toUpperCase());
+}
+
+export function resolveTranscodeAttemptFinalization({ terminal = false, shutdownRequested = false, cancelRequested = false } = {}) {
+	if (terminal) return "terminal";
+	const stopIntent = resolveManagedStopIntent({ shutdownRequested, cancelRequested });
+	if (stopIntent === "shutdown") return "interrupted";
+	if (stopIntent === "cancel") return "cancelled";
+	return "ordinary";
+}
+
+/**
+ * Resolves the one stop intent that may control an active attempt. Shutdown
+ * deliberately wins over a user cancellation, but does not itself perform I/O.
+ */
+export function resolveManagedStopIntent({ shutdownRequested = false, cancelRequested = false } = {}) {
+	if (shutdownRequested === true) return "shutdown";
+	if (cancelRequested === true) return "cancel";
+	return null;
+}
+
+/**
+ * A child error does not prove that its stdio and descendants have closed.
+ * During either supported stop intent, retain the managed attempt until close
+ * remains the process-exit confirmation.
+ */
+export function shouldAwaitManagedChildClose(record) {
+	return Boolean(resolveManagedStopIntent(record || {}) && record?.processExitConfirmed !== true);
+}
+
+export function createStudioShutdownPreparation({ queue, recoverPending = async () => ({}), requestActiveShutdown = async () => ({}) }) {
+	if (!queue || typeof queue.close !== "function") throw new TypeError("queue.close must be a function");
+	if (typeof recoverPending !== "function") throw new TypeError("recoverPending must be a function");
+	if (typeof requestActiveShutdown !== "function") throw new TypeError("requestActiveShutdown must be a function");
+	const state = {
+		started: false,
+		acceptingWrites: true,
+		queueClosed: false,
+		startedAt: null,
+		reason: null,
+		preparationPromise: null,
+	};
+
+	const begin = () => {
+		if (state.preparationPromise) return state.preparationPromise;
+		state.started = true;
+		state.acceptingWrites = false;
+		state.startedAt = new Date().toISOString();
+		const queueResult = queue.close();
+		state.queueClosed = true;
+		let activeShutdown;
+		try { activeShutdown = requestActiveShutdown(); }
+		catch { activeShutdown = Promise.reject(new Error("Active transcode shutdown preparation failed")); }
+		const active = Promise.resolve(activeShutdown)
+			.catch(() => ({ ok: false, code: "TRANSCODE_SHUTDOWN_ACTIVE_PREPARATION_FAILED" }));
+		const recovery = Promise.resolve()
+			.then(() => recoverPending(queueResult.pendingJobIds))
+			.catch(() => ({ ok: false, code: "TRANSCODE_SHUTDOWN_PENDING_RECOVERY_FAILED" }));
+		state.preparationPromise = Promise.all([active, recovery]).then(([activeResult, recoveryResult]) => ({
+			ok: activeResult?.ok !== false && recoveryResult?.ok !== false,
+			queue: queueResult,
+			active: activeResult,
+			recovery: recoveryResult,
+		}));
+		return state.preparationPromise;
+	};
+
+	return Object.freeze({
+		begin,
+		isAcceptingWrites() { return state.acceptingWrites; },
+		isStarted() { return state.started; },
+		isQueueClosed() { return state.queueClosed; },
+		snapshot() {
+			return {
+				started: state.started,
+				acceptingWrites: state.acceptingWrites,
+				queueClosed: state.queueClosed,
+				startedAt: state.startedAt,
+			};
 		},
 	});
 }
@@ -171,47 +268,109 @@ export function createTranscodeOperationGuard() {
 
 export function createManagedTranscodeProcesses({ stderrLimit = DEFAULT_STDERR_LIMIT } = {}) {
 	const records = new Map();
+	const pendingShutdownIntents = new Map();
+	const createRecord = (jobId, attempt, { executionStarted = false } = {}) => ({
+		jobId,
+		attempt,
+		child: null,
+		startedAt: new Date().toISOString(),
+		lastProgressAt: null,
+		settled: false,
+		finalizePromise: null,
+		cancelRequested: false,
+		cancelRequestedAt: null,
+		shutdownRequested: false,
+		shutdownRequestedAt: null,
+		shutdownReason: null,
+		executionStarted,
+		spawnStarted: false,
+		completionCommitStarted: false,
+		completionCommitted: false,
+		finalizationPersistenceFailed: false,
+		cancelStatePromise: null,
+		statusUpdatePromise: null,
+		exitInfo: null,
+		graceTimer: null,
+		forceStopRequired: false,
+		forceKillStarted: false,
+		forceKillPromise: null,
+		forceKillResult: null,
+		forceKillFinished: false,
+		forceKillConfirmationTimer: null,
+		processExitConfirmed: false,
+		progressFlushed: false,
+		cleanupCompleted: false,
+		cleanupPromise: null,
+		qSent: false,
+		progressParser: {},
+		stderr: "",
+		exitPromise: null,
+		closePromise: null,
+	});
+	const applyPendingShutdownIntent = (record) => {
+		const pending = pendingShutdownIntents.get(record.jobId);
+		if (!pending || pending.attempt !== record.attempt) return;
+		pendingShutdownIntents.delete(record.jobId);
+		record.shutdownRequested = true;
+		record.shutdownRequestedAt = pending.requestedAt;
+		record.shutdownReason = pending.reason;
+	};
+	const attachChild = (record, child) => {
+		record.child = child;
+		record.executionStarted = true;
+		record.spawnStarted = true;
+		if (child && typeof child.once === "function") {
+			record.exitPromise = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+			record.closePromise = new Promise((resolve) => child.once("close", (code, signal) => {
+				record.processExitConfirmed = true;
+				resolve({ code, signal });
+			}));
+		}
+	};
 	return Object.freeze({
-		attach(jobId, child, { attempt = null } = {}) {
+		reserve(jobId, { attempt = null } = {}) {
 			if (records.has(jobId)) throw queueError("TRANSCODE_PROCESS_DUPLICATE", "This task already has a managed process");
-			const record = {
-				jobId,
-				attempt,
-				child,
-				startedAt: new Date().toISOString(),
-				lastProgressAt: null,
-				settled: false,
-				finalizePromise: null,
-				cancelRequested: false,
-				cancelRequestedAt: null,
-				cancelStatePromise: null,
-				statusUpdatePromise: null,
-				exitInfo: null,
-				graceTimer: null,
-				forceStopRequired: false,
-				forceKillStarted: false,
-				forceKillPromise: null,
-				forceKillResult: null,
-				forceKillFinished: false,
-				forceKillConfirmationTimer: null,
-				processExitConfirmed: false,
-				progressFlushed: false,
-				cleanupCompleted: false,
-				cleanupPromise: null,
-				qSent: false,
-				progressParser: {},
-				stderr: "",
-				exitPromise: null,
-			};
-			if (child && typeof child.once === "function") {
-				record.exitPromise = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
-				record.closePromise = new Promise((resolve) => child.once("close", (code, signal) => {
-					record.processExitConfirmed = true;
-					resolve({ code, signal });
-				}));
-			}
+			const record = createRecord(jobId, attempt, { executionStarted: true });
+			applyPendingShutdownIntent(record);
 			records.set(jobId, record);
 			return record;
+		},
+		attach(jobId, child, { attempt = null } = {}) {
+			let record = records.get(jobId);
+			if (record && (record.attempt !== attempt || record.child)) throw queueError("TRANSCODE_PROCESS_DUPLICATE", "This task already has a managed process");
+			if (!record) {
+				record = createRecord(jobId, attempt, { executionStarted: true });
+				applyPendingShutdownIntent(record);
+				records.set(jobId, record);
+			}
+			attachChild(record, child);
+			return record;
+		},
+		markSpawnStarted(jobId, attempt) {
+			const record = records.get(jobId);
+			if (!record || record.attempt !== attempt) return false;
+			record.executionStarted = true;
+			record.spawnStarted = true;
+			return true;
+		},
+		markCompletionCommitted(jobId, attempt) {
+			const record = records.get(jobId);
+			if (!record || record.attempt !== attempt) return false;
+			record.completionCommitted = true;
+			record.completionCommitStarted = false;
+			return true;
+		},
+		abortCompletionCommit(jobId, attempt) {
+			const record = records.get(jobId);
+			if (!record || record.attempt !== attempt || record.completionCommitted) return false;
+			record.completionCommitStarted = false;
+			return true;
+		},
+		beginCompletionCommit(jobId, attempt) {
+			const record = records.get(jobId);
+			if (!record || record.attempt !== attempt || record.completionCommitted || record.completionCommitStarted) return false;
+			record.completionCommitStarted = true;
+			return true;
 		},
 		appendStderr(jobId, chunk) {
 			const record = records.get(jobId);
@@ -226,6 +385,26 @@ export function createManagedTranscodeProcesses({ stderrLimit = DEFAULT_STDERR_L
 			record.cancelRequested = true;
 			record.cancelRequestedAt = new Date().toISOString();
 			return { record, requested: true };
+		},
+		requestShutdown(jobId, attempt) {
+			const record = records.get(jobId);
+			if (record && record.attempt === attempt) {
+				if (record.completionCommitted) return { record, requested: false, pending: false, completionCommitted: true };
+				if (record.shutdownRequested) return { record, requested: false, pending: false, completionCommitInProgress: record.completionCommitStarted };
+				record.shutdownRequested = true;
+				record.shutdownRequestedAt = new Date().toISOString();
+				record.shutdownReason = "studio-shutdown";
+				return { record, requested: true, pending: false, completionCommitInProgress: record.completionCommitStarted };
+			}
+			if (!jobId || !Number.isSafeInteger(attempt) || attempt < 1) return null;
+			const pending = pendingShutdownIntents.get(jobId);
+			if (pending?.attempt === attempt) return { record: null, requested: false, pending: true };
+			pendingShutdownIntents.set(jobId, {
+				attempt,
+				requestedAt: new Date().toISOString(),
+				reason: "studio-shutdown",
+			});
+			return { record: null, requested: true, pending: true };
 		},
 		setCancelStatePromise(jobId, attempt, promise) {
 			const record = records.get(jobId);
@@ -294,6 +473,7 @@ export function createManagedTranscodeProcesses({ stderrLimit = DEFAULT_STDERR_L
 			if (record.graceTimer) clearTimeout(record.graceTimer);
 			if (record.forceKillConfirmationTimer) clearTimeout(record.forceKillConfirmationTimer);
 			records.delete(jobId);
+			pendingShutdownIntents.delete(jobId);
 			return record;
 		},
 		clear() {
@@ -302,8 +482,68 @@ export function createManagedTranscodeProcesses({ stderrLimit = DEFAULT_STDERR_L
 				if (record.forceKillConfirmationTimer) clearTimeout(record.forceKillConfirmationTimer);
 			}
 			records.clear();
+			pendingShutdownIntents.clear();
 		},
 	});
+}
+
+/**
+ * Coordinates the shared graceful-stop mechanics for one managed attempt.
+ * Callers persist intent-specific status and decide what happens after grace.
+ */
+export function createManagedTranscodeStopCoordinator({
+	processes,
+	onStopIssue = async () => {},
+	onGraceExpired = async () => {},
+	gracePeriodMs = 5000,
+	setTimeoutImpl = setTimeout,
+} = {}) {
+	if (!processes || typeof processes.get !== "function" || typeof processes.setGraceTimer !== "function") {
+		throw new TypeError("processes must be a managed process registry");
+	}
+	if (typeof onStopIssue !== "function" || typeof onGraceExpired !== "function") {
+		throw new TypeError("stop callbacks must be functions");
+	}
+
+	function isCurrent(jobId, attempt, record) {
+		return processes.get(jobId) === record && record.attempt === attempt;
+	}
+
+	async function request(jobId, attempt, { intent } = {}) {
+		if (!['cancel', 'shutdown'].includes(intent)) return { requested: false, reason: "intent-invalid" };
+		const record = processes.get(jobId);
+		if (!isCurrent(jobId, attempt, record) || record.finalizePromise || record.processExitConfirmed) {
+			return { requested: false, reason: "not-runnable" };
+		}
+		if (resolveManagedStopIntent(record) !== intent) return { requested: false, reason: "intent-changed" };
+		if (record.qSent) return { requested: false, alreadyRequested: true, intent: resolveManagedStopIntent(record) };
+
+		record.qSent = true;
+		const stopError = "FFmpeg did not accept the graceful stop request";
+		const reportIssue = () => Promise.resolve(onStopIssue({ jobId, attempt, record, intent: resolveManagedStopIntent(record), message: stopError })).catch(() => {});
+		try {
+			if (!record.child || record.child.exitCode !== null || !record.child.stdin || !record.child.stdin.writable) {
+				await reportIssue();
+			} else {
+				record.child.stdin.write("q\n", (error) => {
+					if (error) reportIssue();
+				});
+			}
+		} catch {
+			await reportIssue();
+		}
+
+		const timer = setTimeoutImpl(() => {
+			const current = processes.get(jobId);
+			const currentIntent = resolveManagedStopIntent(current || {});
+			if (!isCurrent(jobId, attempt, current) || current.finalizePromise || current.processExitConfirmed || !currentIntent) return;
+			Promise.resolve(onGraceExpired({ jobId, attempt, record: current, intent: currentIntent })).catch(() => {});
+		}, gracePeriodMs);
+		processes.setGraceTimer(jobId, attempt, timer);
+		return { requested: true, intent };
+	}
+
+	return Object.freeze({ request });
 }
 
 function normalizedForceKillResult(value) {

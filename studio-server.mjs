@@ -60,11 +60,17 @@ import {
 } from "./shared/transcode-policy.mjs";
 import {
 	createManagedForceKillCoordinator,
+	createManagedTranscodeStopCoordinator,
 	createManagedTranscodeProcesses,
 	createProgressPersistence,
+	createStudioShutdownPreparation,
 	removeFilesWithRetry,
+	resolveManagedStopIntent,
+	resolveTranscodeAttemptFinalization,
+	shouldAwaitManagedChildClose,
 	createTranscodeOperationGuard,
 	createTranscodeQueue,
+	isStudioApiWriteRequest,
 } from "./shared/transcode-runtime.mjs";
 import { forceKillWindowsProcessTree } from "./shared/windows-process-control.mjs";
 
@@ -119,11 +125,26 @@ const managedForceKillCoordinator = createManagedForceKillCoordinator({
 	onForceKillResult: async ({ jobId, attempt, record, result }) => markTranscodeForceKillResult(jobId, attempt, record, result),
 	onProcessStuck: async ({ jobId, attempt, record }) => markTranscodeProcessStuck(jobId, attempt, record),
 });
+const managedTranscodeStopCoordinator = createManagedTranscodeStopCoordinator({
+	processes: managedTranscodeProcesses,
+	onStopIssue: async ({ jobId, attempt, message }) => markTranscodeForceStopRequired(jobId, attempt, message),
+	onGraceExpired: async ({ jobId, attempt, record }) => {
+		await markTranscodeForceStopRequired(jobId, attempt, "FFmpeg is still stopping and needs forced cleanup", { forceStopInProgress: true });
+		const latest = managedTranscodeProcesses.get(jobId);
+		if (!latest || latest !== record || latest.attempt !== attempt || latest.finalizePromise || latest.processExitConfirmed || !resolveManagedStopIntent(latest)) return;
+		await managedForceKillCoordinator.start(jobId, attempt);
+	},
+});
 const transcodeQueue = createTranscodeQueue({
 	runJob: async (jobId) => runQueuedAudioJob(jobId),
 	onJobError: async (jobId, error) => {
 		await failQueuedAudioJob(jobId, error).catch((failure) => console.warn(`Studio transcode queue recovery failed for ${jobId}:`, failure.message));
 	},
+});
+const studioShutdownPreparation = createStudioShutdownPreparation({
+	queue: transcodeQueue,
+	recoverPending: (pendingJobIds) => recoverQueuedTranscodeJobsForShutdown(pendingJobIds),
+	requestActiveShutdown: () => requestActiveTranscodeShutdownIntent(),
 });
 
 let previewMarkdownRendererPromise;
@@ -1461,6 +1482,17 @@ function assertStudioWriteRequest(req) {
 	}
 }
 
+function assertStudioAcceptingApiWrites(req, url) {
+	if (!isStudioApiWriteRequest({ method: req.method, pathname: url.pathname })) return;
+	if (!studioShutdownPreparation.isAcceptingWrites()) {
+		throw new StudioError("Studio is shutting down and is not accepting new changes", 503, "STUDIO_SHUTTING_DOWN");
+	}
+}
+
+function beginStudioShutdownPreparation() {
+	return studioShutdownPreparation.begin();
+}
+
 function toolVersionLine(output) {
 	return String(output || "").split(/\r?\n/).find((line) => line.trim())?.trim().slice(0, 180) || "";
 }
@@ -1805,6 +1837,18 @@ function normalizeTranscodeCancellation(value) {
 	};
 }
 
+function normalizeTranscodeInterruption(value) {
+	if (value === null || value === undefined) return null;
+	if (!isRecord(value) || value.requested !== true || !isSafeIsoTime(value.requestedAt) || value.reason !== "studio-shutdown") {
+		throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
+	}
+	return {
+		requested: true,
+		requestedAt: value.requestedAt,
+		reason: "studio-shutdown",
+	};
+}
+
 function normalizeTranscodeCleanupWarning(value) {
 	if (value === null || value === undefined) return null;
 	if (!isRecord(value) || value.code !== "TRANSCODE_PARTIAL_CLEANUP_FAILED"
@@ -1815,6 +1859,8 @@ function normalizeTranscodeCleanupWarning(value) {
 }
 
 function transcodeJobSummary(job) {
+	const shutdownStopping = job.interruption?.requested === true && job.state === "cancelling";
+	const stopStatusCode = job.error?.code || null;
 	return {
 		version: job.version,
 		id: job.id,
@@ -1838,8 +1884,12 @@ function transcodeJobSummary(job) {
 		canAddToLibrary: false,
 		canRetry: canRetryTranscodeJob(job.state),
 		cancellationMessage: job.cancellation?.message || null,
-		forceStopRequired: job.cancellation?.forceStopRequired === true,
-		forceStopInProgress: job.cancellation?.forceStopInProgress === true,
+		interruptionMessage: shutdownStopping ? (job.error?.message || "Studio is stopping the current transcode") : null,
+		forceStopRequired: job.cancellation?.forceStopRequired === true
+			|| (shutdownStopping && ["TRANSCODE_FORCE_STOP_REQUIRED", "TRANSCODE_SHUTDOWN_FORCE_KILL_FAILED", "TRANSCODE_PROCESS_STUCK"].includes(stopStatusCode)),
+		forceStopInProgress: job.cancellation?.forceStopInProgress === true
+			|| (shutdownStopping && stopStatusCode === "TRANSCODE_FORCE_STOP_REQUIRED"),
+		interruption: job.interruption || null,
 		output: job.output || null,
 		cleanupWarning: job.cleanupWarning || null,
 		error: job.error || null,
@@ -1872,6 +1922,7 @@ function validateTranscodeJob(value) {
 	value.progress = normalizeTranscodeProgress(value.progress);
 	value.runtime = normalizeTranscodeRuntime(value.runtime);
 	value.cancellation = normalizeTranscodeCancellation(value.cancellation);
+	value.interruption = normalizeTranscodeInterruption(value.interruption);
 	value.cleanupWarning = normalizeTranscodeCleanupWarning(value.cleanupWarning);
 	return value;
 }
@@ -1981,6 +2032,7 @@ function newTranscodeJob(sourceType) {
 		output: null,
 		error: null,
 		cancellation: null,
+		interruption: null,
 		cleanupWarning: null,
 	};
 }
@@ -2270,6 +2322,23 @@ function cancellationSummary(record, message, forceStopRequired = false, forceSt
 	};
 }
 
+function shutdownInterruptionSummary(record) {
+	return {
+		requested: true,
+		requestedAt: record?.shutdownRequestedAt || new Date().toISOString(),
+		reason: "studio-shutdown",
+	};
+}
+
+function isShutdownInterruptionRequested(record, job) {
+	return record?.shutdownRequested === true || job?.interruption?.requested === true;
+}
+
+const SHUTDOWN_INTERRUPTION_ERROR = Object.freeze({
+	code: "TRANSCODE_INTERRUPTED_BY_SHUTDOWN",
+	message: "转码因 Studio 关闭而中断，可在下次启动后重新开始。",
+});
+
 function cleanupWarningFromResult(result) {
 	if (!result || result.success) return null;
 	return {
@@ -2296,32 +2365,50 @@ async function cleanupAttemptOutput(task, record) {
 	}
 }
 
+async function finalizeShutdownInterruptedAttempt(task, record) {
+	const cleanupError = await cleanupAttemptOutput(task, record);
+	transcodeProgressPersistence.clear(task.job.id);
+	if (isTerminalTranscodeState(task.job.state)) return { job: task.job, interrupted: task.job.state === "interrupted" };
+	try {
+		task.job = await persistTranscodeJobTransition(task.directory, task.job, "interrupted", {
+			interruption: shutdownInterruptionSummary(record),
+			cancellation: null,
+			cleanupWarning: cleanupError,
+			error: SHUTDOWN_INTERRUPTION_ERROR,
+			output: null,
+		});
+		return { job: task.job, interrupted: true };
+	} catch {
+		// The saved state still owns its source lock. Keep this attempt in memory
+		// for shutdown recovery instead of pretending its interrupted write worked.
+		if (record) record.finalizationPersistenceFailed = true;
+		return { job: task.job, interrupted: false, persistenceFailed: true };
+	}
+}
+
 async function markTranscodeForceStopRequired(jobId, attempt, message, { forceStopInProgress = false } = {}) {
 	const record = managedTranscodeProcesses.get(jobId);
 	if (!record || record.attempt !== attempt || record.finalizePromise) return;
 	managedTranscodeProcesses.markForceStopRequired(jobId, attempt);
-	const update = (async () => {
-		const task = await readTranscodeJob(jobId);
-		if (task.job.runtime?.attempt !== attempt || task.job.state !== "cancelling") return;
-		task.job.cancellation = cancellationSummary(record, message, true, forceStopInProgress);
-		task.job.error = { code: "TRANSCODE_FORCE_STOP_REQUIRED", message };
-		task.job.updatedAt = new Date().toISOString();
-		await writeTranscodeJob(task.directory, task.job);
-	})();
-	const trackedUpdate = update.finally(() => {
-		if (record.statusUpdatePromise === trackedUpdate) record.statusUpdatePromise = null;
+	await updateTranscodeStopStatus(jobId, attempt, record, {
+		message,
+		errorCode: "TRANSCODE_FORCE_STOP_REQUIRED",
+		forceStopInProgress,
 	});
-	record.statusUpdatePromise = trackedUpdate;
-	await trackedUpdate.catch(() => {});
 }
 
-async function updateTranscodeCancellationStatus(jobId, attempt, record, { message, errorCode = null, forceStopInProgress = false } = {}) {
+async function updateTranscodeStopStatus(jobId, attempt, record, { message, errorCode = null, forceStopInProgress = false } = {}) {
 	const current = managedTranscodeProcesses.get(jobId);
 	if (current !== record || current.attempt !== attempt || current.finalizePromise) return;
 	const update = (async () => {
 		const task = await readTranscodeJob(jobId);
 		if (task.job.runtime?.attempt !== attempt || task.job.state !== "cancelling") return;
-		task.job.cancellation = cancellationSummary(record, message, true, forceStopInProgress);
+		if (resolveManagedStopIntent(record) === "shutdown") {
+			task.job.interruption = shutdownInterruptionSummary(record);
+			task.job.cancellation = null;
+		} else {
+			task.job.cancellation = cancellationSummary(record, message, true, forceStopInProgress);
+		}
 		task.job.error = errorCode ? { code: errorCode, message } : null;
 		task.job.updatedAt = new Date().toISOString();
 		await writeTranscodeJob(task.directory, task.job);
@@ -2335,8 +2422,11 @@ async function updateTranscodeCancellationStatus(jobId, attempt, record, { messa
 
 async function markTranscodeForceKillResult(jobId, attempt, record, result) {
 	if (!result?.safeErrorCode) return;
-	const code = result.safeErrorCode === "TRANSCODE_TASKKILL_FAILED" ? "TRANSCODE_FORCE_KILL_FAILED" : result.safeErrorCode;
-	await updateTranscodeCancellationStatus(jobId, attempt, record, {
+	const shutdown = resolveManagedStopIntent(record) === "shutdown";
+	const code = shutdown
+		? "TRANSCODE_SHUTDOWN_FORCE_KILL_FAILED"
+		: (result.safeErrorCode === "TRANSCODE_TASKKILL_FAILED" ? "TRANSCODE_FORCE_KILL_FAILED" : result.safeErrorCode);
+	await updateTranscodeStopStatus(jobId, attempt, record, {
 		message: "FFmpeg force stop could not be confirmed",
 		errorCode: code,
 		forceStopInProgress: false,
@@ -2344,7 +2434,7 @@ async function markTranscodeForceKillResult(jobId, attempt, record, result) {
 }
 
 async function markTranscodeProcessStuck(jobId, attempt, record) {
-	await updateTranscodeCancellationStatus(jobId, attempt, record, {
+	await updateTranscodeStopStatus(jobId, attempt, record, {
 		message: "FFmpeg is still running after forced stop was requested",
 		errorCode: "TRANSCODE_PROCESS_STUCK",
 		forceStopInProgress: false,
@@ -2355,6 +2445,7 @@ async function finalizeTranscodeAttempt(context, outcome) {
 	const { jobId, attempt, partialFile, preset, effectiveBitrateKbps } = context;
 	const record = managedTranscodeProcesses.get(jobId);
 	if (record && record.attempt !== attempt) return { ignored: true };
+	let retainManagedRecord = false;
 	const finalize = async () => {
 		try {
 			managedTranscodeProcesses.clearGraceTimer(jobId, attempt);
@@ -2365,8 +2456,18 @@ async function finalizeTranscodeAttempt(context, outcome) {
 			await flushAttemptProgress(jobId, attempt);
 			let task = await readTranscodeJob(jobId);
 			if (task.job.runtime?.attempt !== attempt) return { ignored: true };
-
-			if (record?.cancelRequested || task.job.state === "cancelling") {
+			const finalization = resolveTranscodeAttemptFinalization({
+				terminal: isTerminalTranscodeState(task.job.state),
+				shutdownRequested: isShutdownInterruptionRequested(record, task.job),
+				cancelRequested: record?.cancelRequested === true || task.job.state === "cancelling",
+			});
+			if (finalization === "terminal") return { job: task.job, terminal: true };
+			if (finalization === "interrupted") {
+				const result = await finalizeShutdownInterruptedAttempt(task, record);
+				if (result.persistenceFailed) retainManagedRecord = true;
+				return result;
+			}
+			if (finalization === "cancelled") {
 				const cleanupError = await cleanupAttemptOutput(task, record);
 				transcodeProgressPersistence.clear(jobId);
 				if (task.job.state === "cancelling") {
@@ -2382,15 +2483,38 @@ async function finalizeTranscodeAttempt(context, outcome) {
 			if (outcome.kind === "close" && outcome.code === 0 && task.job.state === "transcoding") {
 				task.job = await persistTranscodeJobTransition(task.directory, task.job, "validating-output");
 				const output = await validateAudioTranscodeOutput({ outputFile: partialFile, extension: preset.extension, preset, sourceProbe: task.job.probe, effectiveBitrateKbps });
+				if (isShutdownInterruptionRequested(record, task.job)) {
+					const result = await finalizeShutdownInterruptedAttempt(task, record);
+					if (result.persistenceFailed) retainManagedRecord = true;
+					return result;
+				}
 				const outputDirectory = await getSafeTranscodeOutputDirectory(task.directory);
 				const finalFile = path.join(outputDirectory, output.filename);
 				await rename(partialFile, finalFile);
-				task.job = await persistTranscodeJobTransition(task.directory, task.job, "completed", {
-					output,
-					error: null,
-					cancellation: null,
-					progress: { ...task.job.progress, percent: 100, updatedAt: new Date().toISOString() },
-				});
+				if (isShutdownInterruptionRequested(record, task.job)) {
+					const result = await finalizeShutdownInterruptedAttempt(task, record);
+					if (result.persistenceFailed) retainManagedRecord = true;
+					return result;
+				}
+				if (!managedTranscodeProcesses.beginCompletionCommit(jobId, attempt)) {
+					const result = await finalizeShutdownInterruptedAttempt(task, record);
+					if (result.persistenceFailed) retainManagedRecord = true;
+					return result;
+				}
+				// The atomic manifest replacement cannot be safely cancelled midway.
+				// A shutdown that arrives during it lets a successful completed write win.
+				try {
+					task.job = await persistTranscodeJobTransition(task.directory, task.job, "completed", {
+						output,
+						error: null,
+						cancellation: null,
+						progress: { ...task.job.progress, percent: 100, updatedAt: new Date().toISOString() },
+					});
+					managedTranscodeProcesses.markCompletionCommitted(jobId, attempt);
+				} catch (error) {
+					managedTranscodeProcesses.abortCompletionCommit(jobId, attempt);
+					throw error;
+				}
 				return { job: task.job, completed: true };
 			}
 
@@ -2408,6 +2532,11 @@ async function finalizeTranscodeAttempt(context, outcome) {
 		} catch (error) {
 			const task = await readTranscodeJob(jobId).catch(() => null);
 			if (task && !isTerminalTranscodeState(task.job.state)) {
+				if (isShutdownInterruptionRequested(record, task.job)) {
+					const result = await finalizeShutdownInterruptedAttempt(task, record);
+					if (result.persistenceFailed) retainManagedRecord = true;
+					return result;
+				}
 				const cleanupError = await cleanupAttemptOutput(task, record);
 				transcodeProgressPersistence.clear(jobId);
 				await persistTranscodeJobTransition(task.directory, task.job, "failed", {
@@ -2420,7 +2549,9 @@ async function finalizeTranscodeAttempt(context, outcome) {
 			managedTranscodeProcesses.clearGraceTimer(jobId, attempt);
 			managedTranscodeProcesses.clearForceKillConfirmationTimer(jobId, attempt);
 			transcodeProgressPersistence.clear(jobId);
-			managedTranscodeProcesses.finish(jobId, attempt);
+			if (!retainManagedRecord && !record?.finalizationPersistenceFailed) {
+				managedTranscodeProcesses.finish(jobId, attempt);
+			}
 		}
 	};
 	if (!record) return finalize();
@@ -2429,6 +2560,10 @@ async function finalizeTranscodeAttempt(context, outcome) {
 
 async function runManagedFfmpegAudio(context) {
 	const { jobId, attempt, executable, args, durationSeconds } = context;
+	const reserved = managedTranscodeProcesses.get(jobId);
+	if (!reserved || reserved.attempt !== attempt) return finalizeTranscodeAttempt(context, { kind: "error" });
+	if (reserved.shutdownRequested) return finalizeTranscodeAttempt(context, { kind: "shutdown-before-spawn" });
+	managedTranscodeProcesses.markSpawnStarted(jobId, attempt);
 	let child;
 	try {
 		child = spawn(executable, args, { shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
@@ -2441,27 +2576,30 @@ async function runManagedFfmpegAudio(context) {
 	child.stderr.on("data", (chunk) => managedTranscodeProcesses.appendStderr(jobId, chunk));
 	if (child.stdin && typeof child.stdin.on === "function") {
 		child.stdin.on("error", () => {
-			if (record.cancelRequested) markTranscodeForceStopRequired(jobId, attempt, "FFmpeg did not accept the graceful stop request").catch(() => {});
+			if (resolveManagedStopIntent(record)) markTranscodeForceStopRequired(jobId, attempt, "FFmpeg did not accept the graceful stop request").catch(() => {});
 		});
 	}
 	return new Promise((resolve) => {
 		let delivery = null;
-		let childErrorDuringCancellation = false;
+		let childErrorDuringStop = false;
 		const settle = (outcome) => {
 			if (!delivery) delivery = finalizeTranscodeAttempt(context, outcome);
 			delivery.then(resolve, () => resolve({ failed: true }));
 		};
 		child.once("error", () => {
-			if (record.cancelRequested && !record.processExitConfirmed && Number.isSafeInteger(child.pid) && child.pid > 0) {
-				childErrorDuringCancellation = true;
+			if (shouldAwaitManagedChildClose(record)) {
+				childErrorDuringStop = true;
 				return;
 			}
 			settle({ kind: "error" });
 		});
 		child.once("close", (code, signal) => {
 			managedTranscodeProcesses.setExitInfo(jobId, attempt, { code, signal: signal || null });
-			settle(childErrorDuringCancellation ? { kind: "error", code, signal: signal || null } : { kind: "close", code, signal: signal || null });
+			settle(childErrorDuringStop ? { kind: "error", code, signal: signal || null } : { kind: "close", code, signal: signal || null });
 		});
+		if (resolveManagedStopIntent(record) === "shutdown") {
+			requestManagedTranscodeStop(jobId, attempt, record, { intent: "shutdown" }).catch(() => {});
+		}
 	});
 }
 
@@ -2530,32 +2668,9 @@ function transcodeCancelStateResponse(job) {
 	throw new StudioError("This transcode task cannot be cancelled in its current state", 409, "TRANSCODE_NOT_CANCELLABLE");
 }
 
-async function requestGracefulFfmpegStop(jobId, attempt, record) {
-	if (!record || record.attempt !== attempt || record.qSent || record.finalizePromise) return;
-	record.qSent = true;
-	const stopError = "FFmpeg did not accept the graceful stop request";
-	try {
-		if (!record.child || record.child.exitCode !== null || !record.child.stdin || !record.child.stdin.writable) {
-			await markTranscodeForceStopRequired(jobId, attempt, stopError);
-		} else {
-			record.child.stdin.write("q\n", (error) => {
-				if (error) markTranscodeForceStopRequired(jobId, attempt, stopError).catch(() => {});
-			});
-		}
-	} catch {
-		await markTranscodeForceStopRequired(jobId, attempt, stopError);
-	}
-	const timer = setTimeout(() => {
-		const current = managedTranscodeProcesses.get(jobId);
-		if (!current || current.attempt !== attempt || current.finalizePromise || !current.cancelRequested) return;
-		(async () => {
-			await markTranscodeForceStopRequired(jobId, attempt, "FFmpeg is still stopping and needs forced cleanup", { forceStopInProgress: true });
-			const latest = managedTranscodeProcesses.get(jobId);
-			if (!latest || latest.attempt !== attempt || latest.finalizePromise || latest.processExitConfirmed || !latest.cancelRequested) return;
-			await managedForceKillCoordinator.start(jobId, attempt);
-		})().catch(() => {});
-	}, 5000);
-	managedTranscodeProcesses.setGraceTimer(jobId, attempt, timer);
+async function requestManagedTranscodeStop(jobId, attempt, record, { intent = "cancel" } = {}) {
+	if (managedTranscodeProcesses.get(jobId) !== record) return { requested: false, reason: "stale-attempt" };
+	return managedTranscodeStopCoordinator.request(jobId, attempt, { intent });
 }
 
 async function cancelTranscodeJob(id) {
@@ -2585,7 +2700,7 @@ async function cancelTranscodeJob(id) {
 			} finally {
 				if (record.cancelStatePromise === transition) record.cancelStatePromise = null;
 			}
-			await requestGracefulFfmpegStop(id, attempt, record);
+			await requestManagedTranscodeStop(id, attempt, record, { intent: "cancel" });
 			return { status: 202, body: { ok: true, job: transcodeJobSummary(task.job) } };
 		}
 		if (task.job.state !== "queued") return transcodeCancelStateResponse(task.job);
@@ -2623,6 +2738,140 @@ async function cancelTranscodeJob(id) {
 	});
 }
 
+async function collectQueuedTranscodeJobIdsForShutdown(pendingJobIds) {
+	const ids = new Set((Array.isArray(pendingJobIds) ? pendingJobIds : []).filter((id) => safeTranscodeJobId(id)));
+	const taskRoot = await getSafeTranscodeRoot();
+	for (const entry of await readdir(taskRoot.directory, { withFileTypes: true })) {
+		if (!entry.isDirectory() || entry.isSymbolicLink() || !safeTranscodeJobId(entry.name) || transcodeQueue.isActive(entry.name)) continue;
+		try {
+			const task = await readTranscodeJob(entry.name);
+			if (task.job.state === "queued") ids.add(entry.name);
+		} catch {
+			// Startup recovery remains responsible for isolating corrupted manifests.
+		}
+	}
+	return [...ids];
+}
+
+async function recoverQueuedTranscodeJobForShutdown(id) {
+	return withTranscodeJobOperation(id, "TRANSCODE_SHUTDOWN_PENDING_RECOVERY_FAILED", async () => {
+		if (transcodeQueue.isActive(id)) return { id, recovered: false, skipped: "active" };
+		const task = await readTranscodeJob(id);
+		if (task.job.state !== "queued") return { id, recovered: false, skipped: "state" };
+		transcodeProgressPersistence.clear(id);
+		const cleanup = await cleanupTranscodePartialOutput(task.directory, { removeAll: true });
+		const job = await persistTranscodeJobTransition(task.directory, task.job, "ready", {
+			progress: null,
+			output: null,
+			cancellation: null,
+			cleanupWarning: cleanupWarningFromResult(cleanup),
+			error: null,
+		});
+		return { id, recovered: true, job };
+	});
+}
+
+async function recoverQueuedTranscodeJobsForShutdown(pendingJobIds) {
+	const result = { ok: true, recovered: 0, skippedActive: 0, errors: [] };
+	let ids;
+	try {
+		ids = await collectQueuedTranscodeJobIdsForShutdown(pendingJobIds);
+	} catch {
+		return { ok: false, recovered: 0, skippedActive: 0, errors: [{ code: "TRANSCODE_SHUTDOWN_PENDING_RECOVERY_FAILED" }] };
+	}
+	for (const id of ids) {
+		try {
+			const recovery = await recoverQueuedTranscodeJobForShutdown(id);
+			if (recovery.recovered) result.recovered += 1;
+			if (recovery.skipped === "active") result.skippedActive += 1;
+		} catch (error) {
+			result.ok = false;
+			result.errors.push({ id, code: error instanceof StudioError ? error.code : "TRANSCODE_SHUTDOWN_PENDING_RECOVERY_FAILED" });
+		}
+	}
+	return result;
+}
+
+async function persistActiveTranscodeShutdownInterruption(id, attempt, record) {
+	const update = (async () => {
+		const task = await readTranscodeJob(id);
+		if (task.job.runtime?.attempt !== attempt || isTerminalTranscodeState(task.job.state)) return { ok: true, persisted: false, terminal: true };
+		if (!["transcoding", "cancelling", "validating-output"].includes(task.job.state)) return { ok: true, persisted: false, state: task.job.state };
+		const interruption = shutdownInterruptionSummary(record);
+		if (task.job.state === "transcoding") {
+			task.job = await persistTranscodeJobTransition(task.directory, task.job, "cancelling", {
+				interruption,
+				cancellation: null,
+				error: null,
+			});
+		} else {
+			task.job.interruption = interruption;
+			task.job.cancellation = null;
+			task.job.updatedAt = new Date().toISOString();
+			await writeTranscodeJob(task.directory, task.job);
+		}
+		return { ok: true, persisted: true, state: task.job.state };
+	})();
+	if (!record) return update;
+	const trackedUpdate = update.finally(() => {
+		if (record.statusUpdatePromise === trackedUpdate) record.statusUpdatePromise = null;
+	});
+	record.statusUpdatePromise = trackedUpdate;
+	return trackedUpdate;
+}
+
+async function requestActiveTranscodeShutdownIntent() {
+	const activeId = transcodeQueue.snapshot().activeId;
+	if (!activeId) return { ok: true, active: false };
+	let task;
+	try {
+		task = await readTranscodeJob(activeId);
+	} catch {
+		return { ok: false, code: "TRANSCODE_SHUTDOWN_ACTIVE_PREPARATION_FAILED" };
+	}
+	if (isTerminalTranscodeState(task.job.state) || task.job.state === "ready") return { ok: true, active: true, requested: false, state: task.job.state };
+	if (task.job.state === "queued") {
+		return withTranscodeJobOperation(activeId, "TRANSCODE_SHUTDOWN_ACTIVE_PREPARATION_FAILED", async () => {
+			const latest = await readTranscodeJob(activeId);
+			if (latest.job.state !== "queued") return { ok: true, active: true, requested: false, state: latest.job.state };
+			transcodeProgressPersistence.clear(activeId);
+			await persistTranscodeJobTransition(latest.directory, latest.job, "ready", {
+				progress: null,
+				output: null,
+				cancellation: null,
+				interruption: null,
+				error: null,
+			});
+			return { ok: true, active: true, requested: true, preExecution: true };
+		});
+	}
+	const attempt = task.job.runtime?.attempt;
+	const request = managedTranscodeProcesses.requestShutdown(activeId, attempt);
+	if (!request) return { ok: false, code: "TRANSCODE_SHUTDOWN_ACTIVE_PREPARATION_FAILED" };
+	if (request.completionCommitted) return { ok: true, active: true, requested: false, completed: true };
+	// Do not race an in-flight completed manifest replacement with a second
+	// interruption write. Its atomic result is the irreversible boundary.
+	if (request.completionCommitInProgress) return { ok: true, active: true, requested: request.requested, completionCommitInProgress: true };
+	let persistenceFailed = false;
+	if (request.requested || task.job.interruption?.requested === true) {
+		try {
+			await persistActiveTranscodeShutdownInterruption(activeId, attempt, request.record);
+		} catch {
+			persistenceFailed = true;
+		}
+	}
+	if (request.record?.child && !request.record.processExitConfirmed) {
+		await requestManagedTranscodeStop(activeId, attempt, request.record, { intent: "shutdown" }).catch(() => {});
+	}
+	return {
+		ok: !persistenceFailed,
+		active: true,
+		requested: request.requested,
+		pending: request.pending === true,
+		...(persistenceFailed ? { code: "TRANSCODE_SHUTDOWN_ACTIVE_PREPARATION_FAILED" } : {}),
+	};
+}
+
 async function runQueuedAudioJob(jobId) {
 	let task = await readTranscodeJob(jobId);
 	if (task.job.state !== "queued") throw new StudioError("Transcode task is no longer queued", 409, "TRANSCODE_INVALID_STATE");
@@ -2643,14 +2892,22 @@ async function runQueuedAudioJob(jobId) {
 	const partialFile = path.join(outputDirectory, `output.partial.${preset.extension}`);
 	const effectiveBitrateKbps = resolveAudioEffectiveBitrate(task.job.probe, preset);
 	const args = buildAudioFfmpegArgs({ sourceFile: source.file, outputFile: partialFile, preset, effectiveBitrateKbps, channels: task.job.probe?.audio?.channels });
+	const latestBeforeStart = await readTranscodeJob(jobId);
+	if (latestBeforeStart.job.state !== "queued") {
+		if (latestBeforeStart.job.state === "ready") return { ok: true, job: transcodeJobSummary(latestBeforeStart.job), skipped: true };
+		throw new StudioError("Transcode task is no longer queued", 409, "TRANSCODE_INVALID_STATE");
+	}
+	task = latestBeforeStart;
 	task.job = await persistTranscodeJobTransition(task.directory, task.job, "transcoding", {
 		error: null,
 		cleanupWarning: null,
 		progress: null,
 		output: null,
 		cancellation: null,
+		interruption: null,
 		encoder: { kind: "ffmpeg", codec: preset.codec },
 	});
+	managedTranscodeProcesses.reserve(jobId, { attempt: task.job.runtime.attempt });
 	return runManagedFfmpegAudio({
 		jobId,
 		attempt: task.job.runtime.attempt,
@@ -2692,10 +2949,23 @@ async function startAudioTranscodeJob(id, input) {
 		output: null,
 		cleanupWarning: null,
 		error: null,
+		interruption: null,
 	});
 	try {
 		transcodeQueue.enqueue(id);
 	} catch (error) {
+		if (error?.code === "TRANSCODE_QUEUE_CLOSED") {
+			const latest = await readTranscodeJob(id).catch(() => null);
+			if (latest?.job.state === "queued") {
+				await persistTranscodeJobTransition(latest.directory, latest.job, "ready", {
+					progress: null,
+					output: null,
+					cancellation: null,
+					error: null,
+				}).catch(() => {});
+			}
+			throw new StudioError("Studio is shutting down and cannot queue this task", 503, "STUDIO_SHUTTING_DOWN");
+		}
 		if (error?.code === "TRANSCODE_QUEUE_DUPLICATE" || transcodeQueue.has(id)) {
 			throw new StudioError("This transcode task has already started", 409, "TRANSCODE_ALREADY_STARTED");
 		}
@@ -4039,6 +4309,7 @@ async function restorePost(trashPath) {
 const server = createServer(async (req, res) => {
 	try {
 		const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
+		assertStudioAcceptingApiWrites(req, url);
 		if (req.method === "GET" && url.pathname === "/") {
 			const html = (await readFile(uiPath, "utf8")).replace("__STUDIO_SESSION_TOKEN__", STUDIO_SESSION_TOKEN);
 			send(res, 200, html, {

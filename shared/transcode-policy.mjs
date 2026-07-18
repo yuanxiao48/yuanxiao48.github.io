@@ -170,6 +170,11 @@ export function transitionTranscodeJobState(job, nextState, patch = {}, now = ne
 		runtime.startedAt = null;
 		runtime.finishedAt = null;
 	}
+	if (nextState === "ready") {
+		runtime.queuedAt = null;
+		runtime.startedAt = null;
+		runtime.finishedAt = null;
+	}
 	if (nextState === "transcoding") {
 		runtime.startedAt = now;
 		runtime.finishedAt = null;

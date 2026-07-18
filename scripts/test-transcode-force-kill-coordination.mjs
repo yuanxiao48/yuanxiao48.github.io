@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { createManagedForceKillCoordinator, createManagedTranscodeProcesses } from "../shared/transcode-runtime.mjs";
+import { createManagedForceKillCoordinator, createManagedTranscodeProcesses, resolveManagedStopIntent } from "../shared/transcode-runtime.mjs";
 
 class FakeChild extends EventEmitter {
 	constructor(pid) {
@@ -58,6 +58,8 @@ processes.finish("job-a", 1);
 
 const childB = new FakeChild(102);
 const recordB = processes.attach("job-b", childB, { attempt: 2 });
+assert.equal(processes.requestShutdown("job-b", 2).requested, true);
+assert.equal(resolveManagedStopIntent(recordB), "shutdown");
 const failed = coordinator.start("job-b", 2);
 await Promise.resolve();
 pendingResults.get(102)({ attempted: true, launched: true, timedOut: false, exitCode: 1, signal: null, safeErrorCode: "TRANSCODE_TASKKILL_FAILED" });
