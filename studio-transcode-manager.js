@@ -200,6 +200,16 @@ export function createTranscodeManager() {
 				const speed = typeof progress?.speed === "number" ? `${progress.speed.toFixed(2)}x` : "速度未知";
 				const eta = typeof progress?.etaSeconds === "number" ? `预计剩余 ${formatDuration(progress.etaSeconds)}` : "预计剩余未知";
 				detail.textContent = `${percent} · 已处理 ${processed} · ${speed} · ${eta}`;
+			} else if (job.state === "cancelling") {
+				if (job.error?.code === "TRANSCODE_PROCESS_STUCK") {
+					detail.textContent = "无法确认 FFmpeg 已停止。任务保持锁定，请重启 Studio 后恢复。";
+				} else if (job.forceStopInProgress) {
+					detail.textContent = "FFmpeg 未在宽限时间内退出，正在强制停止。";
+				} else {
+					detail.textContent = "正在停止 FFmpeg。";
+				}
+			} else if (job.state === "cancelled" && job.cleanupWarning) {
+				detail.textContent = "任务已取消，但部分临时文件将在下次启动时继续清理。";
 			} else if (job.state === "completed" && job.output) {
 				const ratio = job.sourceSize && job.output.size ? `${Math.max(0, ((1 - job.output.size / job.sourceSize) * 100)).toFixed(1)}%` : "--";
 				detail.textContent = `已完成技术验证 · ${job.output.codec || "未知编码"} · ${formatBytes(job.output.size)} · 体积变化 ${ratio}`;
@@ -218,7 +228,7 @@ export function createTranscodeManager() {
 	function scheduleJobPolling(jobs) {
 		stopJobPolling();
 		if (panel?.classList.contains("hidden")) return;
-		const isRunning = jobs.some((job) => ["queued", "transcoding", "validating-output"].includes(job.state));
+		const isRunning = jobs.some((job) => ["queued", "transcoding", "cancelling", "validating-output"].includes(job.state));
 		if (!isRunning) return;
 		jobPollTimer = window.setTimeout(() => {
 			jobPollTimer = null;

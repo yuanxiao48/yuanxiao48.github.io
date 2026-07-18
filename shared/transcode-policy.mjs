@@ -142,7 +142,7 @@ export function shouldLockTranscodeLibrarySource(value) {
 }
 
 export function canCancelTranscodeJob(value) {
-	return value === "queued";
+	return value === "queued" || value === "transcoding";
 }
 
 export function canRetryTranscodeJob(value) {

@@ -1,5 +1,6 @@
 const DEFAULT_PROGRESS_PERSIST_MS = 2000;
 const DEFAULT_STDERR_LIMIT = 16 * 1024;
+const DEFAULT_OUTPUT_CLEANUP_DELAYS_MS = Object.freeze([0, 150, 400, 900]);
 
 function queueError(code, message) {
 	const error = new Error(message);
@@ -101,6 +102,60 @@ export function createProgressPersistence({ write, delayMs = DEFAULT_PROGRESS_PE
 	});
 }
 
+function cleanupErrorCode(error) {
+	return typeof error?.code === "string" ? error.code : "";
+}
+
+function isRetryableCleanupError(error) {
+	return ["EBUSY", "EPERM", "EACCES"].includes(cleanupErrorCode(error));
+}
+
+/**
+ * Removes only the caller-provided, already-boundary-checked output files.
+ * This intentionally has no directory traversal or wildcard behavior.
+ */
+export async function removeFilesWithRetry({
+	files,
+	removeFile,
+	delaysMs = DEFAULT_OUTPUT_CLEANUP_DELAYS_MS,
+	wait = (delay) => new Promise((resolve) => setTimeout(resolve, delay)),
+} = {}) {
+	if (!Array.isArray(files) || typeof removeFile !== "function") throw new TypeError("files and removeFile are required");
+	const delays = Array.isArray(delaysMs) && delaysMs.length ? delaysMs : DEFAULT_OUTPUT_CLEANUP_DELAYS_MS;
+	let removedCount = 0;
+	let missingCount = 0;
+	let failedCount = 0;
+
+	for (const file of files) {
+		let finished = false;
+		for (let index = 0; index < delays.length; index += 1) {
+			if (index > 0) await wait(delays[index]);
+			try {
+				await removeFile(file);
+				removedCount += 1;
+				finished = true;
+				break;
+			} catch (error) {
+				if (cleanupErrorCode(error) === "ENOENT") {
+					missingCount += 1;
+					finished = true;
+					break;
+				}
+				if (!isRetryableCleanupError(error) || index === delays.length - 1) break;
+			}
+		}
+		if (!finished) failedCount += 1;
+	}
+
+	return {
+		success: failedCount === 0,
+		removedCount,
+		missingCount,
+		failedCount,
+		safeErrorCode: failedCount ? "TRANSCODE_PARTIAL_CLEANUP_FAILED" : null,
+	};
+}
+
 export function createTranscodeOperationGuard() {
 	const active = new Set();
 	return Object.freeze({
@@ -117,11 +172,43 @@ export function createTranscodeOperationGuard() {
 export function createManagedTranscodeProcesses({ stderrLimit = DEFAULT_STDERR_LIMIT } = {}) {
 	const records = new Map();
 	return Object.freeze({
-		attach(jobId, child) {
+		attach(jobId, child, { attempt = null } = {}) {
 			if (records.has(jobId)) throw queueError("TRANSCODE_PROCESS_DUPLICATE", "This task already has a managed process");
-			const record = { child, startedAt: new Date().toISOString(), lastProgressAt: null, cancelRequested: false, progressParser: {}, stderr: "", exitPromise: null, cleanupTimer: null };
+			const record = {
+				jobId,
+				attempt,
+				child,
+				startedAt: new Date().toISOString(),
+				lastProgressAt: null,
+				settled: false,
+				finalizePromise: null,
+				cancelRequested: false,
+				cancelRequestedAt: null,
+				cancelStatePromise: null,
+				statusUpdatePromise: null,
+				exitInfo: null,
+				graceTimer: null,
+				forceStopRequired: false,
+				forceKillStarted: false,
+				forceKillPromise: null,
+				forceKillResult: null,
+				forceKillFinished: false,
+				forceKillConfirmationTimer: null,
+				processExitConfirmed: false,
+				progressFlushed: false,
+				cleanupCompleted: false,
+				cleanupPromise: null,
+				qSent: false,
+				progressParser: {},
+				stderr: "",
+				exitPromise: null,
+			};
 			if (child && typeof child.once === "function") {
 				record.exitPromise = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+				record.closePromise = new Promise((resolve) => child.once("close", (code, signal) => {
+					record.processExitConfirmed = true;
+					resolve({ code, signal });
+				}));
 			}
 			records.set(jobId, record);
 			return record;
@@ -132,9 +219,140 @@ export function createManagedTranscodeProcesses({ stderrLimit = DEFAULT_STDERR_L
 			record.stderr = `${record.stderr}${String(chunk || "")}`.slice(-stderrLimit);
 		},
 		markProgress(jobId) { const record = records.get(jobId); if (record) record.lastProgressAt = new Date().toISOString(); },
-		requestCancel(jobId) { const record = records.get(jobId); if (record) record.cancelRequested = true; },
+		requestCancel(jobId, attempt) {
+			const record = records.get(jobId);
+			if (!record || (attempt !== undefined && attempt !== null && record.attempt !== attempt)) return null;
+			if (record.cancelRequested) return { record, requested: false };
+			record.cancelRequested = true;
+			record.cancelRequestedAt = new Date().toISOString();
+			return { record, requested: true };
+		},
+		setCancelStatePromise(jobId, attempt, promise) {
+			const record = records.get(jobId);
+			if (!record || record.attempt !== attempt) return false;
+			record.cancelStatePromise = promise || null;
+			return true;
+		},
+		setExitInfo(jobId, attempt, exitInfo) {
+			const record = records.get(jobId);
+			if (!record || record.attempt !== attempt) return false;
+			record.exitInfo = exitInfo || null;
+			return true;
+		},
+		setGraceTimer(jobId, attempt, timer) {
+			const record = records.get(jobId);
+			if (!record || record.attempt !== attempt) return false;
+			if (record.graceTimer) clearTimeout(record.graceTimer);
+			record.graceTimer = timer || null;
+			return true;
+		},
+		clearGraceTimer(jobId, attempt) {
+			const record = records.get(jobId);
+			if (!record || (attempt !== undefined && attempt !== null && record.attempt !== attempt)) return false;
+			if (record.graceTimer) clearTimeout(record.graceTimer);
+			record.graceTimer = null;
+			return true;
+		},
+		markForceStopRequired(jobId, attempt) {
+			const record = records.get(jobId);
+			if (!record || record.attempt !== attempt) return false;
+			record.forceStopRequired = true;
+			return true;
+		},
+		setForceKillConfirmationTimer(jobId, attempt, timer) {
+			const record = records.get(jobId);
+			if (!record || record.attempt !== attempt) return false;
+			if (record.forceKillConfirmationTimer) clearTimeout(record.forceKillConfirmationTimer);
+			record.forceKillConfirmationTimer = timer || null;
+			return true;
+		},
+		clearForceKillConfirmationTimer(jobId, attempt) {
+			const record = records.get(jobId);
+			if (!record || (attempt !== undefined && attempt !== null && record.attempt !== attempt)) return false;
+			if (record.forceKillConfirmationTimer) clearTimeout(record.forceKillConfirmationTimer);
+			record.forceKillConfirmationTimer = null;
+			return true;
+		},
+		markProgressFlushed(jobId, attempt) {
+			const record = records.get(jobId);
+			if (!record || record.attempt !== attempt) return false;
+			record.progressFlushed = true;
+			return true;
+		},
+		beginFinalize(jobId, attempt, finalize) {
+			const record = records.get(jobId);
+			if (!record || record.attempt !== attempt) return null;
+			if (record.finalizePromise) return record.finalizePromise;
+			record.settled = true;
+			record.finalizePromise = Promise.resolve().then(finalize);
+			return record.finalizePromise;
+		},
 		get(jobId) { return records.get(jobId) || null; },
-		finish(jobId) { const record = records.get(jobId) || null; records.delete(jobId); return record; },
-		clear() { for (const record of records.values()) if (record.cleanupTimer) clearTimeout(record.cleanupTimer); records.clear(); },
+		finish(jobId, attempt) {
+			const record = records.get(jobId) || null;
+			if (!record || (attempt !== undefined && attempt !== null && record.attempt !== attempt)) return null;
+			if (record.graceTimer) clearTimeout(record.graceTimer);
+			if (record.forceKillConfirmationTimer) clearTimeout(record.forceKillConfirmationTimer);
+			records.delete(jobId);
+			return record;
+		},
+		clear() {
+			for (const record of records.values()) {
+				if (record.graceTimer) clearTimeout(record.graceTimer);
+				if (record.forceKillConfirmationTimer) clearTimeout(record.forceKillConfirmationTimer);
+			}
+			records.clear();
+		},
 	});
+}
+
+function normalizedForceKillResult(value) {
+	if (value && typeof value === "object") return value;
+	return { attempted: false, launched: false, timedOut: false, exitCode: null, signal: null, safeErrorCode: "TRANSCODE_FORCE_KILL_FAILED" };
+}
+
+export function createManagedForceKillCoordinator({
+	processes,
+	forceKill,
+	onForceKillResult = async () => {},
+	onProcessStuck = async () => {},
+	confirmationDelayMs = 2000,
+	setTimeoutImpl = setTimeout,
+} = {}) {
+	if (!processes || typeof processes.get !== "function") throw new TypeError("processes must be a managed process registry");
+	if (typeof forceKill !== "function") throw new TypeError("forceKill must be a function");
+
+	function isCurrent(jobId, attempt, record) {
+		return processes.get(jobId) === record && record.attempt === attempt;
+	}
+
+	function start(jobId, attempt) {
+		const record = processes.get(jobId);
+		if (!record || record.attempt !== attempt || record.finalizePromise || record.processExitConfirmed) return null;
+		if (record.forceKillStarted) return record.forceKillPromise;
+		record.forceKillStarted = true;
+		const promise = Promise.resolve()
+			.then(() => forceKill({ pid: record.child?.pid }))
+			.catch(() => ({ attempted: false, launched: false, timedOut: false, exitCode: null, signal: null, safeErrorCode: "TRANSCODE_FORCE_KILL_FAILED" }))
+			.then(async (rawResult) => {
+				const result = normalizedForceKillResult(rawResult);
+				if (!isCurrent(jobId, attempt, record)) return result;
+				record.forceKillResult = result;
+				record.forceKillFinished = true;
+				if (record.processExitConfirmed || record.finalizePromise) return result;
+				try { await onForceKillResult({ jobId, attempt, record, result }); } catch { /* preserve the active slot when status persistence fails */ }
+				if (!isCurrent(jobId, attempt, record) || record.processExitConfirmed || record.finalizePromise) return result;
+				const timer = setTimeoutImpl(() => {
+					const current = processes.get(jobId);
+					if (current !== record || current.attempt !== attempt || current.processExitConfirmed || current.finalizePromise) return;
+					Promise.resolve(onProcessStuck({ jobId, attempt, record, result })).catch(() => {});
+				}, confirmationDelayMs);
+				processes.setForceKillConfirmationTimer(jobId, attempt, timer);
+				return result;
+			});
+		record.forceKillPromise = promise;
+		return promise;
+	}
+
+	return Object.freeze({ start });
 }

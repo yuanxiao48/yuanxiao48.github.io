@@ -59,11 +59,14 @@ import {
 	TRANSCODE_TASKS,
 } from "./shared/transcode-policy.mjs";
 import {
+	createManagedForceKillCoordinator,
 	createManagedTranscodeProcesses,
 	createProgressPersistence,
+	removeFilesWithRetry,
 	createTranscodeOperationGuard,
 	createTranscodeQueue,
 } from "./shared/transcode-runtime.mjs";
+import { forceKillWindowsProcessTree } from "./shared/windows-process-control.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const settingsPath = path.join(root, "src", "config", "userSettings.json");
@@ -110,6 +113,12 @@ const STUDIO_SESSION_TOKEN = randomUUID();
 const activeTranscodeSourceLocks = new Map();
 const transcodeJobOperationGuard = createTranscodeOperationGuard();
 const managedTranscodeProcesses = createManagedTranscodeProcesses();
+const managedForceKillCoordinator = createManagedForceKillCoordinator({
+	processes: managedTranscodeProcesses,
+	forceKill: forceKillWindowsProcessTree,
+	onForceKillResult: async ({ jobId, attempt, record, result }) => markTranscodeForceKillResult(jobId, attempt, record, result),
+	onProcessStuck: async ({ jobId, attempt, record }) => markTranscodeProcessStuck(jobId, attempt, record),
+});
 const transcodeQueue = createTranscodeQueue({
 	runJob: async (jobId) => runQueuedAudioJob(jobId),
 	onJobError: async (jobId, error) => {
@@ -1779,6 +1788,32 @@ function normalizeTranscodeRuntime(value) {
 	};
 }
 
+function normalizeTranscodeCancellation(value) {
+	if (value === null || value === undefined) return null;
+	if (!isRecord(value)
+		|| (value.requestedAt !== null && value.requestedAt !== undefined && !isSafeIsoTime(value.requestedAt))
+		|| (value.message !== null && value.message !== undefined && (typeof value.message !== "string" || value.message.length > 240))
+		|| (value.forceStopRequired !== undefined && typeof value.forceStopRequired !== "boolean")
+		|| (value.forceStopInProgress !== undefined && typeof value.forceStopInProgress !== "boolean")) {
+		throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
+	}
+	return {
+		requestedAt: value.requestedAt ?? null,
+		message: value.message ?? null,
+		forceStopRequired: value.forceStopRequired === true,
+		forceStopInProgress: value.forceStopInProgress === true,
+	};
+}
+
+function normalizeTranscodeCleanupWarning(value) {
+	if (value === null || value === undefined) return null;
+	if (!isRecord(value) || value.code !== "TRANSCODE_PARTIAL_CLEANUP_FAILED"
+		|| typeof value.message !== "string" || value.message.length > 240) {
+		throw new StudioError("Transcode task manifest is invalid", 422, "TRANSCODE_JOB_MANIFEST_INVALID");
+	}
+	return { code: value.code, message: value.message };
+}
+
 function transcodeJobSummary(job) {
 	return {
 		version: job.version,
@@ -1802,7 +1837,11 @@ function transcodeJobSummary(job) {
 		canCancel: canCancelTranscodeJob(job.state),
 		canAddToLibrary: false,
 		canRetry: canRetryTranscodeJob(job.state),
+		cancellationMessage: job.cancellation?.message || null,
+		forceStopRequired: job.cancellation?.forceStopRequired === true,
+		forceStopInProgress: job.cancellation?.forceStopInProgress === true,
 		output: job.output || null,
+		cleanupWarning: job.cleanupWarning || null,
 		error: job.error || null,
 	};
 }
@@ -1832,6 +1871,8 @@ function validateTranscodeJob(value) {
 	}
 	value.progress = normalizeTranscodeProgress(value.progress);
 	value.runtime = normalizeTranscodeRuntime(value.runtime);
+	value.cancellation = normalizeTranscodeCancellation(value.cancellation);
+	value.cleanupWarning = normalizeTranscodeCleanupWarning(value.cleanupWarning);
 	return value;
 }
 
@@ -1862,7 +1903,6 @@ async function writeTranscodeJob(directory, job) {
 async function persistTranscodeJobTransition(directory, job, nextState, patch = {}) {
 	if (nextState === "queued") {
 		await revalidateTranscodeSource({ job, directory });
-		if (job.state === "completed") await cleanupTranscodePartialOutput(directory, { removeAll: true });
 	}
 	let next;
 	try {
@@ -1940,6 +1980,8 @@ function newTranscodeJob(sourceType) {
 		runtime: { queuedAt: null, startedAt: null, finishedAt: null, attempt: 0 },
 		output: null,
 		error: null,
+		cancellation: null,
+		cleanupWarning: null,
 	};
 }
 
@@ -1988,15 +2030,44 @@ async function getSafeTranscodeOutputDirectory(directory, { create = false } = {
 	return outputDirectory;
 }
 
+const transcodeOutputFilenames = Object.freeze([
+	"output.partial.m4a",
+	"output.partial.mp3",
+	"output.m4a",
+	"output.mp3",
+]);
+
 async function cleanupTranscodePartialOutput(directory, { removeAll = false } = {}) {
-	const outputDirectory = await getSafeTranscodeOutputDirectory(directory);
-	if (!outputDirectory) return;
-	for (const entry of await readdir(outputDirectory, { withFileTypes: true })) {
-		if (!entry.isFile() || entry.isSymbolicLink()) continue;
-		if (removeAll || entry.name.startsWith("output.partial.") || entry.name.startsWith("output.")) {
-			await safeRemove(path.join(outputDirectory, entry.name));
-		}
+	let outputDirectory;
+	try {
+		outputDirectory = await getSafeTranscodeOutputDirectory(directory);
+	} catch {
+		return { success: false, removedCount: 0, missingCount: 0, failedCount: 1, safeErrorCode: "TRANSCODE_PARTIAL_CLEANUP_FAILED" };
 	}
+	if (!outputDirectory) return { success: true, removedCount: 0, missingCount: 0, failedCount: 0, safeErrorCode: null };
+	await assertNoSymlinksWithin(directory, outputDirectory);
+	const names = removeAll
+		? transcodeOutputFilenames
+		: transcodeOutputFilenames.filter((name) => name.startsWith("output.partial."));
+	const files = names.map((name) => path.join(outputDirectory, name));
+	return removeFilesWithRetry({
+		files,
+		removeFile: async (file) => {
+			if (path.dirname(file) !== outputDirectory || !files.includes(file)) {
+				const error = new Error("Untrusted transcode output path");
+				error.code = "EPERM";
+				throw error;
+			}
+			const info = await lstat(file);
+			if (!info.isFile() || info.isSymbolicLink()) {
+				const error = new Error("Transcode output is not a regular file");
+				error.code = "EPERM";
+				throw error;
+			}
+			await assertNoSymlinksWithin(directory, file);
+			await unlink(file);
+		},
+	});
 }
 
 async function cleanupTranscodeTaskPartFiles(directory) {
@@ -2148,12 +2219,14 @@ function parseFfmpegTime(value) {
 	return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
 }
 
-function createFfmpegProgressReader(jobId, durationSeconds) {
+function createFfmpegProgressReader(jobId, attempt, durationSeconds) {
 	let buffer = "";
 	let latestSeconds = 0;
 	let latestPercent = null;
 	let latestSpeed = null;
 	const update = () => {
+		const record = managedTranscodeProcesses.get(jobId);
+		if (!record || record.attempt !== attempt || record.settled) return;
 		const percent = Number.isFinite(durationSeconds) && durationSeconds > 0
 			? Math.max(0, Math.min(100, (latestSeconds / durationSeconds) * 100))
 			: null;
@@ -2188,30 +2261,206 @@ function createFfmpegProgressReader(jobId, durationSeconds) {
 	};
 }
 
-async function runManagedFfmpegAudio(jobId, executable, args, durationSeconds) {
-	return new Promise((resolve, reject) => {
-		let settled = false;
-		let child;
+function cancellationSummary(record, message, forceStopRequired = false, forceStopInProgress = false) {
+	return {
+		requestedAt: record?.cancelRequestedAt || new Date().toISOString(),
+		message,
+		forceStopRequired: forceStopRequired || record?.forceStopRequired === true,
+		forceStopInProgress,
+	};
+}
+
+function cleanupWarningFromResult(result) {
+	if (!result || result.success) return null;
+	return {
+		code: "TRANSCODE_PARTIAL_CLEANUP_FAILED",
+		message: "Temporary transcode output cleanup needs retrying",
+	};
+}
+
+async function flushAttemptProgress(jobId, attempt) {
+	await flushJobProgress(jobId).catch(() => {});
+	managedTranscodeProcesses.markProgressFlushed(jobId, attempt);
+}
+
+async function cleanupAttemptOutput(task, record) {
+	if (record?.cleanupPromise) return record.cleanupPromise;
+	const cleanup = cleanupTranscodePartialOutput(task.directory, { removeAll: true });
+	if (record) record.cleanupPromise = cleanup;
+	try {
+		const result = await cleanup;
+		if (record) record.cleanupCompleted = result.success;
+		return cleanupWarningFromResult(result);
+	} catch {
+		return { code: "TRANSCODE_PARTIAL_CLEANUP_FAILED", message: "Temporary transcode output cleanup needs retrying" };
+	}
+}
+
+async function markTranscodeForceStopRequired(jobId, attempt, message, { forceStopInProgress = false } = {}) {
+	const record = managedTranscodeProcesses.get(jobId);
+	if (!record || record.attempt !== attempt || record.finalizePromise) return;
+	managedTranscodeProcesses.markForceStopRequired(jobId, attempt);
+	const update = (async () => {
+		const task = await readTranscodeJob(jobId);
+		if (task.job.runtime?.attempt !== attempt || task.job.state !== "cancelling") return;
+		task.job.cancellation = cancellationSummary(record, message, true, forceStopInProgress);
+		task.job.error = { code: "TRANSCODE_FORCE_STOP_REQUIRED", message };
+		task.job.updatedAt = new Date().toISOString();
+		await writeTranscodeJob(task.directory, task.job);
+	})();
+	const trackedUpdate = update.finally(() => {
+		if (record.statusUpdatePromise === trackedUpdate) record.statusUpdatePromise = null;
+	});
+	record.statusUpdatePromise = trackedUpdate;
+	await trackedUpdate.catch(() => {});
+}
+
+async function updateTranscodeCancellationStatus(jobId, attempt, record, { message, errorCode = null, forceStopInProgress = false } = {}) {
+	const current = managedTranscodeProcesses.get(jobId);
+	if (current !== record || current.attempt !== attempt || current.finalizePromise) return;
+	const update = (async () => {
+		const task = await readTranscodeJob(jobId);
+		if (task.job.runtime?.attempt !== attempt || task.job.state !== "cancelling") return;
+		task.job.cancellation = cancellationSummary(record, message, true, forceStopInProgress);
+		task.job.error = errorCode ? { code: errorCode, message } : null;
+		task.job.updatedAt = new Date().toISOString();
+		await writeTranscodeJob(task.directory, task.job);
+	})();
+	const trackedUpdate = update.finally(() => {
+		if (record.statusUpdatePromise === trackedUpdate) record.statusUpdatePromise = null;
+	});
+	record.statusUpdatePromise = trackedUpdate;
+	await trackedUpdate.catch(() => {});
+}
+
+async function markTranscodeForceKillResult(jobId, attempt, record, result) {
+	if (!result?.safeErrorCode) return;
+	const code = result.safeErrorCode === "TRANSCODE_TASKKILL_FAILED" ? "TRANSCODE_FORCE_KILL_FAILED" : result.safeErrorCode;
+	await updateTranscodeCancellationStatus(jobId, attempt, record, {
+		message: "FFmpeg force stop could not be confirmed",
+		errorCode: code,
+		forceStopInProgress: false,
+	});
+}
+
+async function markTranscodeProcessStuck(jobId, attempt, record) {
+	await updateTranscodeCancellationStatus(jobId, attempt, record, {
+		message: "FFmpeg is still running after forced stop was requested",
+		errorCode: "TRANSCODE_PROCESS_STUCK",
+		forceStopInProgress: false,
+	});
+}
+
+async function finalizeTranscodeAttempt(context, outcome) {
+	const { jobId, attempt, partialFile, preset, effectiveBitrateKbps } = context;
+	const record = managedTranscodeProcesses.get(jobId);
+	if (record && record.attempt !== attempt) return { ignored: true };
+	const finalize = async () => {
 		try {
-			child = spawn(executable, args, { shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
-		} catch {
-			reject(new StudioError("Unable to start FFmpeg audio encoding", 503, "TRANSCODE_FFMPEG_UNAVAILABLE"));
-			return;
+			managedTranscodeProcesses.clearGraceTimer(jobId, attempt);
+			managedTranscodeProcesses.clearForceKillConfirmationTimer(jobId, attempt);
+			if (record?.cancelStatePromise) await record.cancelStatePromise.catch(() => {});
+			if (record?.statusUpdatePromise) await record.statusUpdatePromise.catch(() => {});
+			if (record?.forceKillPromise) await record.forceKillPromise.catch(() => {});
+			await flushAttemptProgress(jobId, attempt);
+			let task = await readTranscodeJob(jobId);
+			if (task.job.runtime?.attempt !== attempt) return { ignored: true };
+
+			if (record?.cancelRequested || task.job.state === "cancelling") {
+				const cleanupError = await cleanupAttemptOutput(task, record);
+				transcodeProgressPersistence.clear(jobId);
+				if (task.job.state === "cancelling") {
+					task.job = await persistTranscodeJobTransition(task.directory, task.job, "cancelled", {
+						cancellation: cancellationSummary(record, cleanupError ? "FFmpeg stopped; temporary cleanup needs retrying" : "FFmpeg stopped before output validation", record?.forceStopRequired === true, false),
+						cleanupWarning: cleanupError,
+						error: null,
+					});
+				}
+				return { job: task.job, cancelled: true };
+			}
+
+			if (outcome.kind === "close" && outcome.code === 0 && task.job.state === "transcoding") {
+				task.job = await persistTranscodeJobTransition(task.directory, task.job, "validating-output");
+				const output = await validateAudioTranscodeOutput({ outputFile: partialFile, extension: preset.extension, preset, sourceProbe: task.job.probe, effectiveBitrateKbps });
+				const outputDirectory = await getSafeTranscodeOutputDirectory(task.directory);
+				const finalFile = path.join(outputDirectory, output.filename);
+				await rename(partialFile, finalFile);
+				task.job = await persistTranscodeJobTransition(task.directory, task.job, "completed", {
+					output,
+					error: null,
+					cancellation: null,
+					progress: { ...task.job.progress, percent: 100, updatedAt: new Date().toISOString() },
+				});
+				return { job: task.job, completed: true };
+			}
+
+			const cleanupError = await cleanupAttemptOutput(task, record);
+			transcodeProgressPersistence.clear(jobId);
+			if (!isTerminalTranscodeState(task.job.state)) {
+				const failure = outcome.kind === "error"
+					? { code: "TRANSCODE_FFMPEG_UNAVAILABLE", message: "FFmpeg audio encoding could not start" }
+					: { code: "TRANSCODE_FFMPEG_FAILED", message: "FFmpeg audio encoding ended without a valid output" };
+				task.job = await persistTranscodeJobTransition(task.directory, task.job, "failed", {
+					error: cleanupError || failure,
+				});
+			}
+			return { job: task.job, failed: true };
+		} catch (error) {
+			const task = await readTranscodeJob(jobId).catch(() => null);
+			if (task && !isTerminalTranscodeState(task.job.state)) {
+				const cleanupError = await cleanupAttemptOutput(task, record);
+				transcodeProgressPersistence.clear(jobId);
+				await persistTranscodeJobTransition(task.directory, task.job, "failed", {
+					cleanupWarning: cleanupError,
+					error: transcodeJobError(error),
+				}).catch(() => {});
+			}
+			return { failed: true };
+		} finally {
+			managedTranscodeProcesses.clearGraceTimer(jobId, attempt);
+			managedTranscodeProcesses.clearForceKillConfirmationTimer(jobId, attempt);
+			transcodeProgressPersistence.clear(jobId);
+			managedTranscodeProcesses.finish(jobId, attempt);
 		}
-		const finish = (handler, value) => {
-			if (settled) return;
-			settled = true;
-			managedTranscodeProcesses.finish(jobId);
-			handler(value);
+	};
+	if (!record) return finalize();
+	return managedTranscodeProcesses.beginFinalize(jobId, attempt, finalize) || { ignored: true };
+}
+
+async function runManagedFfmpegAudio(context) {
+	const { jobId, attempt, executable, args, durationSeconds } = context;
+	let child;
+	try {
+		child = spawn(executable, args, { shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+	} catch {
+		return finalizeTranscodeAttempt(context, { kind: "error" });
+	}
+	const reader = createFfmpegProgressReader(jobId, attempt, durationSeconds);
+	const record = managedTranscodeProcesses.attach(jobId, child, { attempt });
+	child.stdout.on("data", reader);
+	child.stderr.on("data", (chunk) => managedTranscodeProcesses.appendStderr(jobId, chunk));
+	if (child.stdin && typeof child.stdin.on === "function") {
+		child.stdin.on("error", () => {
+			if (record.cancelRequested) markTranscodeForceStopRequired(jobId, attempt, "FFmpeg did not accept the graceful stop request").catch(() => {});
+		});
+	}
+	return new Promise((resolve) => {
+		let delivery = null;
+		let childErrorDuringCancellation = false;
+		const settle = (outcome) => {
+			if (!delivery) delivery = finalizeTranscodeAttempt(context, outcome);
+			delivery.then(resolve, () => resolve({ failed: true }));
 		};
-		const reader = createFfmpegProgressReader(jobId, durationSeconds);
-		managedTranscodeProcesses.attach(jobId, child);
-		child.stdout.on("data", reader);
-		child.stderr.on("data", (chunk) => managedTranscodeProcesses.appendStderr(jobId, chunk));
-		child.on("error", () => finish(reject, new StudioError("FFmpeg audio encoding could not start", 503, "TRANSCODE_FFMPEG_UNAVAILABLE")));
-		child.on("close", (code, signal) => {
-			if (code === 0) return finish(resolve, { code: 0, signal: null });
-			finish(reject, new StudioError(`FFmpeg audio encoding failed (${code ?? signal ?? "unknown"})`, 502, "TRANSCODE_FFMPEG_FAILED"));
+		child.once("error", () => {
+			if (record.cancelRequested && !record.processExitConfirmed && Number.isSafeInteger(child.pid) && child.pid > 0) {
+				childErrorDuringCancellation = true;
+				return;
+			}
+			settle({ kind: "error" });
+		});
+		child.once("close", (code, signal) => {
+			managedTranscodeProcesses.setExitInfo(jobId, attempt, { code, signal: signal || null });
+			settle(childErrorDuringCancellation ? { kind: "error", code, signal: signal || null } : { kind: "close", code, signal: signal || null });
 		});
 	});
 }
@@ -2257,8 +2506,11 @@ async function failQueuedAudioJob(jobId, error) {
 	transcodeProgressPersistence.clear(jobId);
 	const task = await readTranscodeJob(jobId);
 	if (isTerminalTranscodeState(task.job.state) || task.job.state === "ready") return;
-	await cleanupTranscodePartialOutput(task.directory).catch(() => {});
-	await persistTranscodeJobTransition(task.directory, task.job, "failed", { error: transcodeJobError(error) });
+	const cleanup = await cleanupTranscodePartialOutput(task.directory, { removeAll: true });
+	await persistTranscodeJobTransition(task.directory, task.job, "failed", {
+		cleanupWarning: cleanupWarningFromResult(cleanup),
+		error: transcodeJobError(error),
+	});
 }
 
 async function withTranscodeJobOperation(id, conflictCode, operation) {
@@ -2275,15 +2527,67 @@ async function withTranscodeJobOperation(id, conflictCode, operation) {
 function transcodeCancelStateResponse(job) {
 	if (job.state === "cancelled") return { status: 200, body: { ok: true, job: transcodeJobSummary(job) } };
 	if (job.state === "cancelling") return { status: 202, body: { ok: true, job: transcodeJobSummary(job) } };
-	if (job.state === "transcoding") {
-		throw new StudioError("Cancelling a running FFmpeg task is not available yet", 409, "TRANSCODE_RUNNING_CANCEL_NOT_AVAILABLE");
-	}
 	throw new StudioError("This transcode task cannot be cancelled in its current state", 409, "TRANSCODE_NOT_CANCELLABLE");
+}
+
+async function requestGracefulFfmpegStop(jobId, attempt, record) {
+	if (!record || record.attempt !== attempt || record.qSent || record.finalizePromise) return;
+	record.qSent = true;
+	const stopError = "FFmpeg did not accept the graceful stop request";
+	try {
+		if (!record.child || record.child.exitCode !== null || !record.child.stdin || !record.child.stdin.writable) {
+			await markTranscodeForceStopRequired(jobId, attempt, stopError);
+		} else {
+			record.child.stdin.write("q\n", (error) => {
+				if (error) markTranscodeForceStopRequired(jobId, attempt, stopError).catch(() => {});
+			});
+		}
+	} catch {
+		await markTranscodeForceStopRequired(jobId, attempt, stopError);
+	}
+	const timer = setTimeout(() => {
+		const current = managedTranscodeProcesses.get(jobId);
+		if (!current || current.attempt !== attempt || current.finalizePromise || !current.cancelRequested) return;
+		(async () => {
+			await markTranscodeForceStopRequired(jobId, attempt, "FFmpeg is still stopping and needs forced cleanup", { forceStopInProgress: true });
+			const latest = managedTranscodeProcesses.get(jobId);
+			if (!latest || latest.attempt !== attempt || latest.finalizePromise || latest.processExitConfirmed || !latest.cancelRequested) return;
+			await managedForceKillCoordinator.start(jobId, attempt);
+		})().catch(() => {});
+	}, 5000);
+	managedTranscodeProcesses.setGraceTimer(jobId, attempt, timer);
 }
 
 async function cancelTranscodeJob(id) {
 	return withTranscodeJobOperation(id, "TRANSCODE_QUEUE_STATE_CONFLICT", async () => {
 		let task = await readTranscodeJob(id);
+		if (task.job.state === "transcoding") {
+			const attempt = task.job.runtime?.attempt;
+			const record = managedTranscodeProcesses.get(id);
+			if (!record || record.attempt !== attempt) {
+				throw new StudioError("The running transcode process is no longer available in this Studio session", 409, "TRANSCODE_RUNTIME_NOT_FOUND");
+			}
+			if (record.finalizePromise) return transcodeCancelStateResponse({ ...task.job, state: "validating-output" });
+			const request = managedTranscodeProcesses.requestCancel(id, attempt);
+			if (!request) throw new StudioError("The running transcode process is no longer available in this Studio session", 409, "TRANSCODE_RUNTIME_NOT_FOUND");
+			if (!request.requested) return { status: 202, body: { ok: true, job: transcodeJobSummary(task.job) } };
+			const transition = persistTranscodeJobTransition(task.directory, task.job, "cancelling", {
+				cancellation: cancellationSummary(record, "Stopping FFmpeg gracefully"),
+				error: null,
+			});
+			managedTranscodeProcesses.setCancelStatePromise(id, attempt, transition);
+			try {
+				task.job = await transition;
+			} catch {
+				record.cancelRequested = false;
+				record.cancelRequestedAt = null;
+				throw new StudioError("Studio could not record the cancellation request", 500, "TRANSCODE_CANCEL_FAILED");
+			} finally {
+				if (record.cancelStatePromise === transition) record.cancelStatePromise = null;
+			}
+			await requestGracefulFfmpegStop(id, attempt, record);
+			return { status: 202, body: { ok: true, job: transcodeJobSummary(task.job) } };
+		}
 		if (task.job.state !== "queued") return transcodeCancelStateResponse(task.job);
 
 		// Flush any queued progress before the terminal state makes it immutable.
@@ -2308,10 +2612,12 @@ async function cancelTranscodeJob(id) {
 			transcodeProgressPersistence.clear(id);
 		}
 
-		try {
-			await cleanupTranscodePartialOutput(task.directory, { removeAll: true });
-		} catch {
-			throw new StudioError("The task was cancelled, but temporary output cleanup needs retrying", 500, "TRANSCODE_PARTIAL_CLEANUP_FAILED");
+		const cleanup = await cleanupTranscodePartialOutput(task.directory, { removeAll: true });
+		const cleanupWarning = cleanupWarningFromResult(cleanup);
+		if (cleanupWarning) {
+			task.job.cleanupWarning = cleanupWarning;
+			task.job.updatedAt = new Date().toISOString();
+			await writeTranscodeJob(task.directory, task.job);
 		}
 		return { status: 200, body: { ok: true, job: transcodeJobSummary(task.job) } };
 	});
@@ -2332,32 +2638,29 @@ async function runQueuedAudioJob(jobId) {
 	const ffmpeg = await discoverLocalTool("ffmpeg", settings.ffmpegPath);
 	if (!ffmpeg.available) throw new StudioError("FFmpeg is unavailable", 503, "TRANSCODE_FFMPEG_UNAVAILABLE");
 	const outputDirectory = await getSafeTranscodeOutputDirectory(task.directory, { create: true });
-	await cleanupTranscodePartialOutput(task.directory, { removeAll: true });
+	const cleanup = await cleanupTranscodePartialOutput(task.directory, { removeAll: true });
+	if (!cleanup.success) throw new StudioError("Temporary transcode output cleanup needs retrying", 500, "TRANSCODE_PARTIAL_CLEANUP_FAILED");
 	const partialFile = path.join(outputDirectory, `output.partial.${preset.extension}`);
 	const effectiveBitrateKbps = resolveAudioEffectiveBitrate(task.job.probe, preset);
 	const args = buildAudioFfmpegArgs({ sourceFile: source.file, outputFile: partialFile, preset, effectiveBitrateKbps, channels: task.job.probe?.audio?.channels });
 	task.job = await persistTranscodeJobTransition(task.directory, task.job, "transcoding", {
 		error: null,
+		cleanupWarning: null,
 		progress: null,
 		output: null,
+		cancellation: null,
 		encoder: { kind: "ffmpeg", codec: preset.codec },
 	});
-	try {
-		await runManagedFfmpegAudio(jobId, ffmpeg.command, args, task.job.probe?.duration);
-		await flushJobProgress(jobId);
-		task = await readTranscodeJob(jobId);
-		task.job = await persistTranscodeJobTransition(task.directory, task.job, "validating-output");
-		const output = await validateAudioTranscodeOutput({ outputFile: partialFile, extension: preset.extension, preset, sourceProbe: task.job.probe, effectiveBitrateKbps });
-		const finalFile = path.join(outputDirectory, output.filename);
-		await rename(partialFile, finalFile);
-		task.job = await persistTranscodeJobTransition(task.directory, task.job, "completed", { output, error: null, progress: { ...task.job.progress, percent: 100, updatedAt: new Date().toISOString() } });
-		return task.job;
-	} catch (error) {
-		await safeRemove(partialFile).catch(() => {});
-		throw error;
-	} finally {
-		await flushJobProgress(jobId).catch(() => {});
-	}
+	return runManagedFfmpegAudio({
+		jobId,
+		attempt: task.job.runtime.attempt,
+		executable: ffmpeg.command,
+		args,
+		durationSeconds: task.job.probe?.duration,
+		partialFile,
+		preset,
+		effectiveBitrateKbps,
+	});
 }
 
 async function startAudioTranscodeJob(id, input) {
@@ -2380,12 +2683,14 @@ async function startAudioTranscodeJob(id, input) {
 	}
 	await revalidateTranscodeSource(task);
 	await assertTranscodeDiskSpace(task.job.sourceSize || 0);
-	await cleanupTranscodePartialOutput(task.directory, { removeAll: true });
+	const cleanup = await cleanupTranscodePartialOutput(task.directory, { removeAll: true });
+	if (!cleanup.success) throw new StudioError("Temporary transcode output cleanup needs retrying", 500, "TRANSCODE_PARTIAL_CLEANUP_FAILED");
 	const queued = await persistTranscodeJobTransition(task.directory, task.job, "queued", {
 		preset: { key: preset.key, extension: preset.extension, codec: preset.codec, targetBitrateKbps: preset.targetBitrateKbps },
 		encoder: null,
 		progress: null,
 		output: null,
+		cleanupWarning: null,
 		error: null,
 	});
 	try {
@@ -2590,22 +2895,25 @@ async function cleanupTranscodeTasks({ onlyExpired = false } = {}) {
 		let { job, directory } = task;
 		if (!onlyExpired && ["creating", "uploading", "probing"].includes(job.state)) {
 			await cleanupTranscodeTaskPartFiles(directory);
-			await cleanupTranscodePartialOutput(directory, { removeAll: true });
+			const cleanup = await cleanupTranscodePartialOutput(directory, { removeAll: true });
 			job = await persistTranscodeJobTransition(directory, job, "interrupted", {
+				cleanupWarning: cleanupWarningFromResult(cleanup),
 				error: { code: "STUDIO_RESTARTED", message: "Studio restarted before source preparation completed" },
 			});
 			result.interrupted += 1;
 		}
 		if (!onlyExpired && job.state === "queued") {
-			await cleanupTranscodePartialOutput(directory, { removeAll: true });
+			const cleanup = await cleanupTranscodePartialOutput(directory, { removeAll: true });
 			job = await persistTranscodeJobTransition(directory, job, "ready", {
+				cleanupWarning: cleanupWarningFromResult(cleanup),
 				error: { code: "STUDIO_RESTARTED_QUEUE_RESET", message: "Studio restarted; this queued task was not resumed automatically" },
 			});
 		}
 		if (!onlyExpired && ["transcoding", "cancelling", "validating-output"].includes(job.state)) {
 			await cleanupTranscodeTaskPartFiles(directory);
-			await cleanupTranscodePartialOutput(directory, { removeAll: true });
+			const cleanup = await cleanupTranscodePartialOutput(directory, { removeAll: true });
 			job = await persistTranscodeJobTransition(directory, job, "interrupted", {
+				cleanupWarning: cleanupWarningFromResult(cleanup),
 				error: { code: "STUDIO_RESTARTED", message: "Studio restarted before transcoding completed" },
 			});
 			result.interrupted += 1;
