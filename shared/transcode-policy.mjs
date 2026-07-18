@@ -141,6 +141,14 @@ export function shouldLockTranscodeLibrarySource(value) {
 	return TRANSCODE_LIBRARY_LOCK_STATES.includes(value);
 }
 
+export function canCancelTranscodeJob(value) {
+	return value === "queued";
+}
+
+export function canRetryTranscodeJob(value) {
+	return ["failed", "cancelled", "interrupted"].includes(value);
+}
+
 export function getTranscodeAudioPreset(value) {
 	return typeof value === "string" ? TRANSCODE_AUDIO_PRESETS[value] || null : null;
 }

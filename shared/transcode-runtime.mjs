@@ -42,10 +42,23 @@ export function createTranscodeQueue({ runJob, onJobError = () => {} }) {
 			schedule();
 			return { queuePosition: pending.length, active: false };
 		},
-		getPosition(jobId) {
+		removePending(jobId) {
+			if (activeId === jobId) return { removed: false, reason: "active" };
+			const index = pending.indexOf(jobId);
+			if (index === -1) return { removed: false, reason: "not-found" };
+			pending.splice(index, 1);
+			known.delete(jobId);
+			return { removed: true, position: index + 1 };
+		},
+		hasPending(jobId) { return pending.includes(jobId); },
+		isActive(jobId) { return activeId === jobId; },
+		getQueuePosition(jobId) {
 			if (activeId === jobId) return 0;
 			const index = pending.indexOf(jobId);
 			return index === -1 ? null : index + 1;
+		},
+		getPosition(jobId) {
+			return this.getQueuePosition(jobId);
 		},
 		has(jobId) { return known.has(jobId); },
 		snapshot() {
@@ -85,6 +98,19 @@ export function createProgressPersistence({ write, delayMs = DEFAULT_PROGRESS_PE
 			if (timer) clearTimeout(timer);
 			timers.delete(jobId);
 		},
+	});
+}
+
+export function createTranscodeOperationGuard() {
+	const active = new Set();
+	return Object.freeze({
+		tryAcquire(jobId) {
+			if (!jobId || active.has(jobId)) return false;
+			active.add(jobId);
+			return true;
+		},
+		release(jobId) { active.delete(jobId); },
+		has(jobId) { return active.has(jobId); },
 	});
 }
 

@@ -44,6 +44,8 @@ import {
 } from "./shared/media-embed-policy.mjs";
 import {
 	getTranscodeAudioPreset,
+	canCancelTranscodeJob,
+	canRetryTranscodeJob,
 	isTranscodeInputKind,
 	isTerminalTranscodeState,
 	getTranscodeSourceKindForExtension,
@@ -59,6 +61,7 @@ import {
 import {
 	createManagedTranscodeProcesses,
 	createProgressPersistence,
+	createTranscodeOperationGuard,
 	createTranscodeQueue,
 } from "./shared/transcode-runtime.mjs";
 
@@ -105,6 +108,7 @@ const TOOL_PROBE_TIMEOUT_MS = 10000;
 const TOOL_OUTPUT_MAX_BYTES = 1024 * 1024;
 const STUDIO_SESSION_TOKEN = randomUUID();
 const activeTranscodeSourceLocks = new Map();
+const transcodeJobOperationGuard = createTranscodeOperationGuard();
 const managedTranscodeProcesses = createManagedTranscodeProcesses();
 const transcodeQueue = createTranscodeQueue({
 	runJob: async (jobId) => runQueuedAudioJob(jobId),
@@ -1793,11 +1797,11 @@ function transcodeJobSummary(job) {
 		encoder: job.encoder || null,
 		progress: job.progress || null,
 		runtime: job.runtime || null,
-		queuePosition: transcodeQueue.getPosition(job.id),
+		queuePosition: transcodeQueue.getQueuePosition(job.id),
 		canStartAudio: false,
-		canCancel: false,
+		canCancel: canCancelTranscodeJob(job.state),
 		canAddToLibrary: false,
-		canRetry: ["failed", "cancelled", "interrupted"].includes(job.state),
+		canRetry: canRetryTranscodeJob(job.state),
 		output: job.output || null,
 		error: job.error || null,
 	};
@@ -2257,6 +2261,62 @@ async function failQueuedAudioJob(jobId, error) {
 	await persistTranscodeJobTransition(task.directory, task.job, "failed", { error: transcodeJobError(error) });
 }
 
+async function withTranscodeJobOperation(id, conflictCode, operation) {
+	if (!transcodeJobOperationGuard.tryAcquire(id)) {
+		throw new StudioError("Another request is already updating this transcode task", 409, conflictCode);
+	}
+	try {
+		return await operation();
+	} finally {
+		transcodeJobOperationGuard.release(id);
+	}
+}
+
+function transcodeCancelStateResponse(job) {
+	if (job.state === "cancelled") return { status: 200, body: { ok: true, job: transcodeJobSummary(job) } };
+	if (job.state === "cancelling") return { status: 202, body: { ok: true, job: transcodeJobSummary(job) } };
+	if (job.state === "transcoding") {
+		throw new StudioError("Cancelling a running FFmpeg task is not available yet", 409, "TRANSCODE_RUNNING_CANCEL_NOT_AVAILABLE");
+	}
+	throw new StudioError("This transcode task cannot be cancelled in its current state", 409, "TRANSCODE_NOT_CANCELLABLE");
+}
+
+async function cancelTranscodeJob(id) {
+	return withTranscodeJobOperation(id, "TRANSCODE_QUEUE_STATE_CONFLICT", async () => {
+		let task = await readTranscodeJob(id);
+		if (task.job.state !== "queued") return transcodeCancelStateResponse(task.job);
+
+		// Flush any queued progress before the terminal state makes it immutable.
+		await flushJobProgress(id);
+		const removal = transcodeQueue.removePending(id);
+		if (!removal.removed) {
+			if (removal.reason === "active") {
+				throw new StudioError("This transcode task has already started and cannot be cancelled yet", 409, "TRANSCODE_RUNNING_CANCEL_NOT_AVAILABLE");
+			}
+			task = await readTranscodeJob(id);
+			if (task.job.state !== "queued") return transcodeCancelStateResponse(task.job);
+			throw new StudioError("The transcode queue does not match the saved task state", 409, "TRANSCODE_QUEUE_STATE_CONFLICT");
+		}
+
+		try {
+			task.job = await persistTranscodeJobTransition(task.directory, task.job, "cancelled", {
+				error: null,
+			});
+		} catch (error) {
+			throw new StudioError("The task was removed from the queue but its saved state could not be updated", 500, "TRANSCODE_QUEUE_STATE_CONFLICT");
+		} finally {
+			transcodeProgressPersistence.clear(id);
+		}
+
+		try {
+			await cleanupTranscodePartialOutput(task.directory, { removeAll: true });
+		} catch {
+			throw new StudioError("The task was cancelled, but temporary output cleanup needs retrying", 500, "TRANSCODE_PARTIAL_CLEANUP_FAILED");
+		}
+		return { status: 200, body: { ok: true, job: transcodeJobSummary(task.job) } };
+	});
+}
+
 async function runQueuedAudioJob(jobId) {
 	let task = await readTranscodeJob(jobId);
 	if (task.job.state !== "queued") throw new StudioError("Transcode task is no longer queued", 409, "TRANSCODE_INVALID_STATE");
@@ -2301,6 +2361,7 @@ async function runQueuedAudioJob(jobId) {
 }
 
 async function startAudioTranscodeJob(id, input) {
+	return withTranscodeJobOperation(id, "TRANSCODE_ALREADY_STARTED", async () => {
 	const task = await readTranscodeJob(id);
 	if (task.job.state !== "ready") {
 		if (transcodeQueue.has(id) || ["queued", "transcoding", "validating-output"].includes(task.job.state)) {
@@ -2330,10 +2391,19 @@ async function startAudioTranscodeJob(id, input) {
 	try {
 		transcodeQueue.enqueue(id);
 	} catch (error) {
-		await failQueuedAudioJob(id, new StudioError("This transcode task has already started", 409, "TRANSCODE_ALREADY_STARTED"));
-		throw new StudioError("This transcode task has already started", 409, "TRANSCODE_ALREADY_STARTED");
+		if (error?.code === "TRANSCODE_QUEUE_DUPLICATE" || transcodeQueue.has(id)) {
+			throw new StudioError("This transcode task has already started", 409, "TRANSCODE_ALREADY_STARTED");
+		}
+		const latest = await readTranscodeJob(id).catch(() => null);
+		if (latest?.job.state === "queued") {
+			await persistTranscodeJobTransition(latest.directory, latest.job, "ready", {
+				error: { code: "TRANSCODE_QUEUE_ENQUEUE_FAILED", message: "Studio could not queue this task; it remains ready to retry" },
+			}).catch(() => {});
+		}
+		throw new StudioError("Studio could not queue this transcode task", 503, "TRANSCODE_QUEUE_ENQUEUE_FAILED");
 	}
 	return { ok: true, job: transcodeJobSummary(queued) };
+	});
 }
 
 async function markTranscodeJobFailed(directory, job, error) {
@@ -3780,6 +3850,13 @@ const server = createServer(async (req, res) => {
 		if (req.method === "POST" && transcodeStartMatch) {
 			assertStudioWriteRequest(req);
 			send(res, 202, await startAudioTranscodeJob(transcodeStartMatch[1], await readContentBody(req)));
+			return;
+		}
+		const transcodeCancelMatch = url.pathname.match(/^\/api\/transcode\/jobs\/([0-9a-f-]{36})\/cancel$/i);
+		if (req.method === "POST" && transcodeCancelMatch) {
+			assertStudioWriteRequest(req);
+			const result = await cancelTranscodeJob(transcodeCancelMatch[1]);
+			send(res, result.status, result.body);
 			return;
 		}
 		const transcodeDiscardMatch = url.pathname.match(/^\/api\/transcode\/jobs\/([0-9a-f-]{36})\/discard$/i);
