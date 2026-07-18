@@ -48,7 +48,7 @@ const executor = createTranscodeRecoveryExecutor({
 const context = createStartupRecoveryContext({ startupIdentity: "batch-boot", startupWallTimeMs: nowMs, preexistingHoldJobIds: [] });
 const empty = await executor.recoverBatch({ jobIds: [], context });
 assert.deepEqual(empty, {
-	total: 0, protected: 0, initialHolds: 0, retainedHolds: 0, cleaned: 0, partial: 0, critical: 0,
+	total: 0, protected: 0, initialHolds: 0, retainedHolds: 0, cleaned: 0, partial: 0, preExecution: 0, sourcePartial: 0, sourceAccess: 0, critical: 0,
 	mustBlockListen: false, lockRequiredJobIds: [], items: [],
 });
 
@@ -56,6 +56,9 @@ const outcome = await executor.recoverBatch({ jobIds: [ids[0], ids[1], ids[1], i
 assert.equal(outcome.total, 4);
 assert.equal(outcome.protected, 1);
 assert.equal(outcome.initialHolds, 0);
+assert.equal(outcome.preExecution, 0);
+assert.equal(outcome.sourcePartial, 0);
+assert.equal(outcome.sourceAccess, 0);
 assert.equal(outcome.critical, 2);
 assert.equal(outcome.mustBlockListen, true);
 assert.equal(outcome.items.some((item) => "path" in item), false);

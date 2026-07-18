@@ -96,6 +96,30 @@ const newContext = createStartupRecoveryContext({ startupIdentity: "boot-new", s
 }
 
 {
+	const harness = createHarness(job("creating", { sourceStoredFilename: "source-11111111-1111-4111-8111-111111111111.m4a" }));
+	const outcome = await harness.executor.recoverJob({ jobId: JOB_ID, context: newContext });
+	assert.equal(outcome.status, "preExecutionInterruptionRequired");
+	assert.equal(harness.getStored().recoveryHold, undefined);
+	assert.equal(harness.getStored().preExecutionRecovery, undefined);
+	assert.equal(harness.getStored().sourceStoredFilename, "source-11111111-1111-4111-8111-111111111111.m4a");
+	assert.equal(harness.removed.length, 0);
+}
+
+for (const [state, code, field] of [
+	["uploading", "TRANSCODE_RECOVERY_INCOMPLETE_UPLOAD", "sourcePartialRecoveryRequired"],
+	["probing", "TRANSCODE_RECOVERY_SOURCE_ACCESS_UNCONFIRMED", "sourceAccessRecoveryRequired"],
+]) {
+	const harness = createHarness(job(state, { sourceStoredFilename: "source-11111111-1111-4111-8111-111111111111.m4a" }));
+	const outcome = await harness.executor.recoverJob({ jobId: JOB_ID, context: newContext });
+	assert.equal(outcome.status, "preExecutionRecoveryRequired");
+	assert.equal(outcome[field], true);
+	assert.equal(harness.getStored().preExecutionRecovery.code, code);
+	assert.equal(harness.getStored().recoveryHold, undefined);
+	assert.equal(harness.getStored().sourceStoredFilename, "source-11111111-1111-4111-8111-111111111111.m4a");
+	assert.equal(harness.removed.length, 0);
+}
+
+{
 	const harness = createHarness(job("queued"));
 	const outcome = await harness.executor.recoverJob({ jobId: JOB_ID, context: newContext });
 	assert.equal(outcome.status, "queuedRecoveryRequired");

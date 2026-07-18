@@ -18,6 +18,10 @@ export const TRANSCODE_RECOVERY_POLICY = Object.freeze({
 });
 
 export const TRANSCODE_RECOVERY_HOLD_CODE = "TRANSCODE_RECOVERY_OUTPUT_UNCONFIRMED";
+export const TRANSCODE_PREEXECUTION_RECOVERY_CODES = Object.freeze([
+	"TRANSCODE_RECOVERY_INCOMPLETE_UPLOAD",
+	"TRANSCODE_RECOVERY_SOURCE_ACCESS_UNCONFIRMED",
+]);
 export const TRANSCODE_RECOVERY_WARNING_CODES = Object.freeze([
 	"TRANSCODE_RECOVERY_OUTPUT_UNSAFE",
 	"TRANSCODE_RECOVERY_OUTPUT_CHECK_FAILED",
@@ -194,6 +198,22 @@ export function updateRecoveryHold(hold, { lastCheckedAt, retryAfter } = {}) {
 	});
 }
 
+export function createPreExecutionRecovery({ code, detectedAt } = {}) {
+	if (!TRANSCODE_PREEXECUTION_RECOVERY_CODES.includes(code) || !isSafeIsoTime(detectedAt)) {
+		throw new Error("Pre-execution recovery is invalid");
+	}
+	return freeze({ version: 1, active: true, code, detectedAt });
+}
+
+export function normalizePreExecutionRecovery(value) {
+	if (value === null || value === undefined || value.active === false) return freeze({ recovery: null, malformed: false });
+	if (isRecord(value) && value.version === 1 && value.active === true
+		&& TRANSCODE_PREEXECUTION_RECOVERY_CODES.includes(value.code) && isSafeIsoTime(value.detectedAt)) {
+		return freeze({ recovery: freeze({ version: 1, active: true, code: value.code, detectedAt: value.detectedAt }), malformed: false });
+	}
+	return freeze({ recovery: null, malformed: true });
+}
+
 export function normalizeRecoveryWarning(value) {
 	if (!isRecord(value) || !TRANSCODE_RECOVERY_WARNING_CODES.includes(value.code)) return null;
 	return freeze({ code: value.code, message: recoveryWarningMessage(value.code) });
@@ -228,17 +248,29 @@ export function evaluateRecoveryRecheckEligibility({ hold, holdExistedBeforeStar
 	return freeze({ eligible: true, reasonCode: null });
 }
 
-export function classifyStartupRecoveryRisk(manifest, { hasFixedOutput = false } = {}) {
+export function classifyStartupRecoveryRequirements(manifest, { hasFixedOutput = false } = {}) {
 	if (!isRecord(manifest) || typeof manifest.state !== "string") return "malformedUnsafe";
 	if (manifest.state === "completed") return "terminalProtected";
+	if (["cancelled", "failed", "discarded"].includes(manifest.state)) return "terminalProtected";
+	const preExecution = normalizePreExecutionRecovery(manifest.preExecutionRecovery);
+	if (manifest.state !== "completed" && preExecution.malformed && manifest.preExecutionRecovery !== null && manifest.preExecutionRecovery !== undefined) {
+		return "preExecutionRecoveryRequired";
+	}
+	if (preExecution.recovery) return "preExecutionRecoveryRequired";
+	if (manifest.state === "creating") return hasFixedOutput ? "needsInitialOutputHold" : "needsPreExecutionInterruption";
+	if (manifest.state === "uploading") return "needsIncompleteUploadRecovery";
+	if (manifest.state === "probing") return "needsSourceAccessRecovery";
 	if (["transcoding", "cancelling", "validating-output"].includes(manifest.state)
 		|| (manifest.completionCommitStarted === true && manifest.state !== "completed")) return "needsInitialHold";
 	if (manifest.state === "interrupted" && normalizeRecoveryHold(manifest.recoveryHold).hold) return "needsExistingHoldRecheck";
 	if (manifest.state === "interrupted") return "ordinaryInterrupted";
 	if (manifest.state === "queued") return hasFixedOutput ? "needsInitialHold" : "queuedRecovery";
 	if (manifest.state === "ready") return hasFixedOutput ? "needsInitialHold" : "noRecoveryAction";
-	if (["cancelled", "failed", "discarded"].includes(manifest.state)) return "terminalProtected";
 	return "noRecoveryAction";
+}
+
+export function classifyStartupRecoveryRisk(manifest, options = {}) {
+	return classifyStartupRecoveryRequirements(manifest, options);
 }
 
 export async function inspectRecoveryOutputSnapshot({ jobDirectory, fsApi, pathApi = path, monotonicNowMs } = {}) {

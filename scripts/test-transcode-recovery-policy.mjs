@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import {
 	TRANSCODE_RECOVERY_HOLD_CODE,
 	classifyStartupRecoveryRisk,
+	classifyStartupRecoveryRequirements,
+	createPreExecutionRecovery,
 	createRecoveryHold,
 	evaluateRecoveryRecheckEligibility,
 	normalizeRecoveryHold,
@@ -59,6 +61,11 @@ assert.equal(evaluateRecoveryRecheckEligibility({ hold: { ...hold, lastCheckedAt
 assert.equal(classifyStartupRecoveryRisk({ state: "completed" }), "terminalProtected");
 assert.equal(classifyStartupRecoveryRisk({ state: "completed", completionCommitted: false }), "terminalProtected");
 assert.equal(classifyStartupRecoveryRisk({ state: "validating-output" }), "needsInitialHold");
+assert.equal(classifyStartupRecoveryRisk({ state: "creating" }), "needsPreExecutionInterruption");
+assert.equal(classifyStartupRecoveryRisk({ state: "creating" }, { hasFixedOutput: true }), "needsInitialOutputHold");
+assert.equal(classifyStartupRecoveryRisk({ state: "uploading" }), "needsIncompleteUploadRecovery");
+assert.equal(classifyStartupRecoveryRisk({ state: "probing" }), "needsSourceAccessRecovery");
+assert.equal(classifyStartupRecoveryRequirements({ state: "interrupted", preExecutionRecovery: createPreExecutionRecovery({ code: "TRANSCODE_RECOVERY_INCOMPLETE_UPLOAD", detectedAt: oldIso }) }), "preExecutionRecoveryRequired");
 assert.equal(classifyStartupRecoveryRisk({ state: "ready" }), "noRecoveryAction");
 assert.equal(classifyStartupRecoveryRisk({ state: "ready" }, { hasFixedOutput: true }), "needsInitialHold");
 assert.equal(classifyStartupRecoveryRisk({ state: "queued" }), "queuedRecovery");
