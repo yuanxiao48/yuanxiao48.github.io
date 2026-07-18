@@ -67,6 +67,7 @@ export function createTranscodeManager() {
 	let canProbe = false;
 	let currentXhr = null;
 	let uploadActive = false;
+	let jobPollTimer = null;
 
 	function setStatus(message, state = "") {
 		if (!status) return;
@@ -192,18 +193,46 @@ export function createTranscodeManager() {
 			const meta = document.createElement("p");
 			meta.textContent = `${job.sourceType === "library" ? "媒体库来源" : "电脑来源"} · ${formatBytes(job.sourceSize)} · ${job.state} · ${formatTime(job.updatedAt)}`;
 			const detail = document.createElement("p");
-			detail.textContent = job.error?.message || job.probe?.compatibility?.reason || "源文件已准备，转码将在下一阶段加入。";
+			const progress = job.progress;
+			if (["queued", "transcoding", "validating-output"].includes(job.state)) {
+				const percent = typeof progress?.percent === "number" ? `${progress.percent.toFixed(1)}%` : "正在等待进度";
+				const processed = typeof progress?.processedSeconds === "number" ? formatDuration(progress.processedSeconds) : "--:--";
+				const speed = typeof progress?.speed === "number" ? `${progress.speed.toFixed(2)}x` : "速度未知";
+				const eta = typeof progress?.etaSeconds === "number" ? `预计剩余 ${formatDuration(progress.etaSeconds)}` : "预计剩余未知";
+				detail.textContent = `${percent} · 已处理 ${processed} · ${speed} · ${eta}`;
+			} else if (job.state === "completed" && job.output) {
+				const ratio = job.sourceSize && job.output.size ? `${Math.max(0, ((1 - job.output.size / job.sourceSize) * 100)).toFixed(1)}%` : "--";
+				detail.textContent = `已完成技术验证 · ${job.output.codec || "未知编码"} · ${formatBytes(job.output.size)} · 体积变化 ${ratio}`;
+			} else detail.textContent = job.error?.message || job.probe?.compatibility?.reason || "真实音频运行器已接入。用户启动与取消操作将在下一阶段开放。";
 			card.append(heading, actions, meta, detail);
 			card.addEventListener("click", (event) => { if (!event.target.closest("button") && job.probe) renderProbe(job.probe); });
 			jobList.append(card);
 		}
 	}
 
+	function stopJobPolling() {
+		if (jobPollTimer) window.clearTimeout(jobPollTimer);
+		jobPollTimer = null;
+	}
+
+	function scheduleJobPolling(jobs) {
+		stopJobPolling();
+		if (panel?.classList.contains("hidden")) return;
+		const isRunning = jobs.some((job) => ["queued", "transcoding", "validating-output"].includes(job.state));
+		if (!isRunning) return;
+		jobPollTimer = window.setTimeout(() => {
+			jobPollTimer = null;
+			loadJobs();
+		}, 800);
+	}
+
 	async function loadJobs() {
 		try {
 			const payload = await request("/api/transcode/jobs");
 			renderJobs(payload);
+			scheduleJobPolling(Array.isArray(payload?.items) ? payload.items : []);
 		} catch (error) {
+			stopJobPolling();
 			if (jobList) jobList.replaceChildren(Object.assign(document.createElement("p"), { className: "studio-media-empty error", textContent: error.message || "准备任务读取失败。" }));
 		}
 	}
@@ -310,7 +339,7 @@ export function createTranscodeManager() {
 			return loading;
 		},
 		show: () => { panel?.classList.remove("hidden"); tab?.classList.add("active"); tab?.setAttribute("aria-selected", "true"); },
-		hide: () => { panel?.classList.add("hidden"); tab?.classList.remove("active"); tab?.setAttribute("aria-selected", "false"); },
+		hide: () => { stopJobPolling(); panel?.classList.add("hidden"); tab?.classList.remove("active"); tab?.setAttribute("aria-selected", "false"); },
 		isDirty: () => uploadActive,
 		canLeave: () => {
 			if (!uploadActive) return true;

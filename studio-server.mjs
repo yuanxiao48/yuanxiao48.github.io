@@ -43,6 +43,7 @@ import {
 	normalizeExternalVideoUrl,
 } from "./shared/media-embed-policy.mjs";
 import {
+	getTranscodeAudioPreset,
 	isTranscodeInputKind,
 	isTerminalTranscodeState,
 	getTranscodeSourceKindForExtension,
@@ -51,6 +52,7 @@ import {
 	supportsTranscodePlatform,
 	transitionTranscodeJobState,
 	TRANSCODE_LOCAL_SETTINGS,
+	TRANSCODE_AUDIO_OUTPUT,
 	TRANSCODE_PROTOCOLS,
 	TRANSCODE_TASKS,
 } from "./shared/transcode-policy.mjs";
@@ -105,11 +107,9 @@ const STUDIO_SESSION_TOKEN = randomUUID();
 const activeTranscodeSourceLocks = new Map();
 const managedTranscodeProcesses = createManagedTranscodeProcesses();
 const transcodeQueue = createTranscodeQueue({
-	runJob: async () => {
-		throw new StudioError("The audio runner is not enabled in this Studio phase", 409, "TRANSCODE_RUNNER_NOT_ENABLED");
-	},
+	runJob: async (jobId) => runQueuedAudioJob(jobId),
 	onJobError: async (jobId, error) => {
-		console.warn(`Studio transcode queue runner stopped for ${jobId}:`, error.code || error.message);
+		await failQueuedAudioJob(jobId, error).catch((failure) => console.warn(`Studio transcode queue recovery failed for ${jobId}:`, failure.message));
 	},
 });
 
@@ -1788,12 +1788,15 @@ function transcodeJobSummary(job) {
 		sourceSize: Number.isSafeInteger(job.sourceSize) ? job.sourceSize : null,
 		probe: job.probe || null,
 		preset: job.preset || null,
+		selectedPreset: job.preset?.key || null,
+		effectiveBitrate: job.output?.effectiveBitrateKbps ?? null,
 		encoder: job.encoder || null,
 		progress: job.progress || null,
 		runtime: job.runtime || null,
 		queuePosition: transcodeQueue.getPosition(job.id),
 		canStartAudio: false,
 		canCancel: false,
+		canAddToLibrary: false,
 		canRetry: ["failed", "cancelled", "interrupted"].includes(job.state),
 		output: job.output || null,
 		error: job.error || null,
@@ -2105,6 +2108,234 @@ async function probeTranscodeSource(media) {
 	}
 }
 
+function audioBitrateKbps(probe) {
+	const value = Number(probe?.audio?.bitrate);
+	return Number.isFinite(value) && value > 0 ? value / 1000 : null;
+}
+
+function resolveAudioEffectiveBitrate(probe, preset) {
+	const sourceCodec = String(probe?.audio?.codec || "").toLowerCase();
+	const sourceKbps = audioBitrateKbps(probe);
+	const isLossy = new Set(["mp3", "aac", "opus", "vorbis"]).has(sourceCodec);
+	const isTrusted = isLossy && sourceKbps !== null
+		&& sourceKbps >= TRANSCODE_AUDIO_OUTPUT.minimumTrustedLossyBitrateKbps
+		&& sourceKbps <= TRANSCODE_AUDIO_OUTPUT.maximumTrustedLossyBitrateKbps;
+	if (!isTrusted) return preset.targetBitrateKbps;
+	return Math.max(TRANSCODE_AUDIO_OUTPUT.minimumOutputBitrateKbps, Math.min(preset.targetBitrateKbps, Math.floor(sourceKbps)));
+}
+
+function buildAudioFfmpegArgs({ sourceFile, outputFile, preset, effectiveBitrateKbps, channels }) {
+	const args = [
+		"-hide_banner", "-y", "-protocol_whitelist", TRANSCODE_PROTOCOLS.join(","),
+		"-i", sourceFile, "-map", "0:a:0", "-vn", "-sn", "-dn", "-map_metadata", "-1",
+		"-c:a", preset.codec, "-b:a", `${effectiveBitrateKbps}k`,
+	];
+	if (Number(channels) > 2) args.push("-ac", "2");
+	if (preset.extension === "m4a") args.push("-movflags", "+faststart");
+	args.push("-progress", "pipe:1", "-nostats", outputFile);
+	return args;
+}
+
+function parseFfmpegTime(value) {
+	const text = String(value || "").trim();
+	if (/^\d+(?:\.\d+)?$/.test(text)) return Number(text);
+	const match = text.match(/^(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$/);
+	if (!match) return null;
+	return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
+function createFfmpegProgressReader(jobId, durationSeconds) {
+	let buffer = "";
+	let latestSeconds = 0;
+	let latestPercent = null;
+	let latestSpeed = null;
+	const update = () => {
+		const percent = Number.isFinite(durationSeconds) && durationSeconds > 0
+			? Math.max(0, Math.min(100, (latestSeconds / durationSeconds) * 100))
+			: null;
+		if (latestPercent !== null && percent !== null && percent + 0.05 < latestPercent) return;
+		if (percent !== null) latestPercent = percent;
+		const etaSeconds = percent !== null && latestSpeed && latestSpeed > 0
+			? Math.max(0, (durationSeconds - latestSeconds) / latestSpeed)
+			: null;
+		const progress = {
+			percent: latestPercent === null ? null : Number(latestPercent.toFixed(2)),
+			processedSeconds: Number.isFinite(latestSeconds) ? Number(latestSeconds.toFixed(3)) : null,
+			speed: latestSpeed === null ? null : Number(latestSpeed.toFixed(3)),
+			etaSeconds: etaSeconds === null ? null : Number(etaSeconds.toFixed(1)),
+			updatedAt: new Date().toISOString(),
+		};
+		managedTranscodeProcesses.markProgress(jobId);
+		transcodeProgressPersistence.update(jobId, progress);
+	};
+	return (chunk) => {
+		buffer += chunk.toString("utf8");
+		const lines = buffer.split(/\r?\n/);
+		buffer = lines.pop() || "";
+		for (const line of lines) {
+			const index = line.indexOf("=");
+			if (index < 1) continue;
+			const key = line.slice(0, index); const value = line.slice(index + 1).trim();
+			if (key === "out_time_us" && /^\d+$/.test(value)) latestSeconds = Math.max(latestSeconds, Number(value) / 1_000_000);
+			if (key === "out_time") { const seconds = parseFfmpegTime(value); if (seconds !== null) latestSeconds = Math.max(latestSeconds, seconds); }
+			if (key === "speed") { const speed = Number(value.replace(/x$/i, "")); if (Number.isFinite(speed) && speed > 0) latestSpeed = speed; }
+			if (key === "progress") update();
+		}
+	};
+}
+
+async function runManagedFfmpegAudio(jobId, executable, args, durationSeconds) {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		let child;
+		try {
+			child = spawn(executable, args, { shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+		} catch {
+			reject(new StudioError("Unable to start FFmpeg audio encoding", 503, "TRANSCODE_FFMPEG_UNAVAILABLE"));
+			return;
+		}
+		const finish = (handler, value) => {
+			if (settled) return;
+			settled = true;
+			managedTranscodeProcesses.finish(jobId);
+			handler(value);
+		};
+		const reader = createFfmpegProgressReader(jobId, durationSeconds);
+		managedTranscodeProcesses.attach(jobId, child);
+		child.stdout.on("data", reader);
+		child.stderr.on("data", (chunk) => managedTranscodeProcesses.appendStderr(jobId, chunk));
+		child.on("error", () => finish(reject, new StudioError("FFmpeg audio encoding could not start", 503, "TRANSCODE_FFMPEG_UNAVAILABLE")));
+		child.on("close", (code, signal) => {
+			if (code === 0) return finish(resolve, { code: 0, signal: null });
+			finish(reject, new StudioError(`FFmpeg audio encoding failed (${code ?? signal ?? "unknown"})`, 502, "TRANSCODE_FFMPEG_FAILED"));
+		});
+	});
+}
+
+function normalizeAudioContainer(value) {
+	return new Set(String(value || "").toLowerCase().split(",").map((item) => item.trim()).filter(Boolean));
+}
+
+async function validateAudioTranscodeOutput({ outputFile, extension, preset, sourceProbe, effectiveBitrateKbps }) {
+	const info = await stat(outputFile).catch(() => null);
+	if (!info?.isFile() || info.size <= 0) throw new StudioError("Encoded audio output is missing or empty", 422, "TRANSCODE_OUTPUT_INVALID");
+	if (info.size > TRANSCODE_AUDIO_OUTPUT.maxBytes) throw new StudioError("Encoded audio output exceeds the 50 MiB limit", 413, "TRANSCODE_OUTPUT_TOO_LARGE");
+	const media = { file: outputFile, publicPath: null, kind: "audio", extension: `.${extension}`, info };
+	const probe = await probeTranscodeSource(media);
+	if (!probe.hasAudio || probe.hasVideo) throw new StudioError("Encoded output does not contain a valid audio-only track", 422, "TRANSCODE_OUTPUT_TRACK_INVALID");
+	const expectedCodec = preset.codec === "libmp3lame" ? "mp3" : "aac";
+	if (String(probe.audio?.codec || "").toLowerCase() !== expectedCodec) throw new StudioError("Encoded output codec does not match the selected preset", 422, "TRANSCODE_OUTPUT_CODEC_INVALID");
+	const containers = normalizeAudioContainer(probe.container);
+	if (extension === "m4a" ? !(containers.has("m4a") || containers.has("mp4") || containers.has("mov")) : !containers.has("mp3")) {
+		throw new StudioError("Encoded output container does not match the selected preset", 422, "TRANSCODE_OUTPUT_CONTAINER_INVALID");
+	}
+	if (Number.isFinite(sourceProbe?.duration) && sourceProbe.duration > 0 && Number.isFinite(probe.duration)) {
+		const tolerance = Math.max(3, sourceProbe.duration * 0.05);
+		if (Math.abs(probe.duration - sourceProbe.duration) > tolerance) throw new StudioError("Encoded audio duration differs too much from the source", 422, "TRANSCODE_OUTPUT_DURATION_INVALID");
+	}
+	return {
+		filename: `output.${extension}`,
+		extension,
+		size: info.size,
+		codec: probe.audio.codec,
+		container: probe.container,
+		bitrate: probe.audio.bitrate ?? probe.bitrate ?? null,
+		duration: probe.duration ?? null,
+		channels: probe.audio.channels ?? null,
+		sampleRate: probe.audio.sampleRate ?? null,
+		preset: preset.key,
+		effectiveBitrateKbps,
+		importedPublicPath: null,
+	};
+}
+
+async function failQueuedAudioJob(jobId, error) {
+	transcodeProgressPersistence.clear(jobId);
+	const task = await readTranscodeJob(jobId);
+	if (isTerminalTranscodeState(task.job.state) || task.job.state === "ready") return;
+	await cleanupTranscodePartialOutput(task.directory).catch(() => {});
+	await persistTranscodeJobTransition(task.directory, task.job, "failed", { error: transcodeJobError(error) });
+}
+
+async function runQueuedAudioJob(jobId) {
+	let task = await readTranscodeJob(jobId);
+	if (task.job.state !== "queued") throw new StudioError("Transcode task is no longer queued", 409, "TRANSCODE_INVALID_STATE");
+	const preset = getTranscodeAudioPreset(task.job.preset?.key);
+	if (!preset) throw new StudioError("Transcode audio preset is invalid", 400, "TRANSCODE_PRESET_INVALID");
+	const source = await revalidateTranscodeSource(task);
+	const capabilities = await getTranscodeCapabilities();
+	if (!capabilities.ffmpeg.available || !capabilities.encoders.aac || (preset.codec === "libmp3lame" && !capabilities.encoders.libmp3lame)) {
+		throw new StudioError("The selected audio encoder is unavailable", 503, "TRANSCODE_ENCODER_UNAVAILABLE");
+	}
+	await assertTranscodeDiskSpace(task.job.sourceSize || 0);
+	const settings = await readTranscodeLocalSettings();
+	const ffmpeg = await discoverLocalTool("ffmpeg", settings.ffmpegPath);
+	if (!ffmpeg.available) throw new StudioError("FFmpeg is unavailable", 503, "TRANSCODE_FFMPEG_UNAVAILABLE");
+	const outputDirectory = await getSafeTranscodeOutputDirectory(task.directory, { create: true });
+	await cleanupTranscodePartialOutput(task.directory, { removeAll: true });
+	const partialFile = path.join(outputDirectory, `output.partial.${preset.extension}`);
+	const effectiveBitrateKbps = resolveAudioEffectiveBitrate(task.job.probe, preset);
+	const args = buildAudioFfmpegArgs({ sourceFile: source.file, outputFile: partialFile, preset, effectiveBitrateKbps, channels: task.job.probe?.audio?.channels });
+	task.job = await persistTranscodeJobTransition(task.directory, task.job, "transcoding", {
+		error: null,
+		progress: null,
+		output: null,
+		encoder: { kind: "ffmpeg", codec: preset.codec },
+	});
+	try {
+		await runManagedFfmpegAudio(jobId, ffmpeg.command, args, task.job.probe?.duration);
+		await flushJobProgress(jobId);
+		task = await readTranscodeJob(jobId);
+		task.job = await persistTranscodeJobTransition(task.directory, task.job, "validating-output");
+		const output = await validateAudioTranscodeOutput({ outputFile: partialFile, extension: preset.extension, preset, sourceProbe: task.job.probe, effectiveBitrateKbps });
+		const finalFile = path.join(outputDirectory, output.filename);
+		await rename(partialFile, finalFile);
+		task.job = await persistTranscodeJobTransition(task.directory, task.job, "completed", { output, error: null, progress: { ...task.job.progress, percent: 100, updatedAt: new Date().toISOString() } });
+		return task.job;
+	} catch (error) {
+		await safeRemove(partialFile).catch(() => {});
+		throw error;
+	} finally {
+		await flushJobProgress(jobId).catch(() => {});
+	}
+}
+
+async function startAudioTranscodeJob(id, input) {
+	const task = await readTranscodeJob(id);
+	if (task.job.state !== "ready") {
+		if (transcodeQueue.has(id) || ["queued", "transcoding", "validating-output"].includes(task.job.state)) {
+			throw new StudioError("This transcode task has already started", 409, "TRANSCODE_ALREADY_STARTED");
+		}
+		throw new StudioError("Only ready tasks can start audio transcoding", 409, "TRANSCODE_INVALID_STATE");
+	}
+	const preset = getTranscodeAudioPreset(input?.preset);
+	if (!preset) throw new StudioError("Audio preset is invalid", 400, "TRANSCODE_PRESET_INVALID");
+	if (task.job.probe?.kind === "video" || !task.job.probe?.hasAudio || !task.job.probe?.audio) {
+		throw new StudioError("Audio transcoding requires an audio source with an audio track", 422, "TRANSCODE_AUDIO_REQUIRED");
+	}
+	const capabilities = await getTranscodeCapabilities();
+	if (!capabilities.ffmpeg.available || !capabilities.encoders.aac || (preset.codec === "libmp3lame" && !capabilities.encoders.libmp3lame)) {
+		throw new StudioError("The selected audio encoder is unavailable", 503, "TRANSCODE_ENCODER_UNAVAILABLE");
+	}
+	await revalidateTranscodeSource(task);
+	await assertTranscodeDiskSpace(task.job.sourceSize || 0);
+	await cleanupTranscodePartialOutput(task.directory, { removeAll: true });
+	const queued = await persistTranscodeJobTransition(task.directory, task.job, "queued", {
+		preset: { key: preset.key, extension: preset.extension, codec: preset.codec, targetBitrateKbps: preset.targetBitrateKbps },
+		encoder: null,
+		progress: null,
+		output: null,
+		error: null,
+	});
+	try {
+		transcodeQueue.enqueue(id);
+	} catch (error) {
+		await failQueuedAudioJob(id, new StudioError("This transcode task has already started", 409, "TRANSCODE_ALREADY_STARTED"));
+		throw new StudioError("This transcode task has already started", 409, "TRANSCODE_ALREADY_STARTED");
+	}
+	return { ok: true, job: transcodeJobSummary(queued) };
+}
+
 async function markTranscodeJobFailed(directory, job, error) {
 	const failed = await persistTranscodeJobTransition(directory, job, "failed", { error: transcodeJobError(error) });
 	return { ok: true, job: transcodeJobSummary(failed) };
@@ -2178,7 +2409,11 @@ async function receiveTranscodeSourceUpload(req) {
 	let parserError = null;
 	let aborted = false;
 	let writePromise = Promise.resolve();
-	const busboy = Busboy({ headers: req.headers, limits: { files: 1, fileSize: TRANSCODE_TASKS.sourceMaxBytes, fields: 4, fieldSize: 4096, parts: 8 } });
+	const busboy = Busboy({
+		headers: req.headers,
+		defParamCharset: "utf8",
+		limits: { files: 1, fileSize: TRANSCODE_TASKS.sourceMaxBytes, fields: 4, fieldSize: 4096, parts: 8 },
+	});
 	const complete = new Promise((resolve, reject) => {
 		busboy.on("file", (fieldName, stream, info) => {
 			if (fieldName !== "file" || received) {
@@ -2359,6 +2594,7 @@ async function receiveMediaUpload(req, kind) {
 	let writePromise = Promise.resolve();
 	const busboy = Busboy({
 		headers: req.headers,
+		defParamCharset: "utf8",
 		limits: { files: 1, fileSize: policy.maxBytes, fields: 8, fieldSize: 4096, parts: 12 },
 	});
 	const complete = new Promise((resolve, reject) => {
@@ -3538,6 +3774,12 @@ const server = createServer(async (req, res) => {
 		const transcodeJobMatch = url.pathname.match(/^\/api\/transcode\/jobs\/([0-9a-f-]{36})$/i);
 		if (req.method === "GET" && transcodeJobMatch) {
 			send(res, 200, { ok: true, job: transcodeJobSummary((await readTranscodeJob(transcodeJobMatch[1])).job) });
+			return;
+		}
+		const transcodeStartMatch = url.pathname.match(/^\/api\/transcode\/jobs\/([0-9a-f-]{36})\/start$/i);
+		if (req.method === "POST" && transcodeStartMatch) {
+			assertStudioWriteRequest(req);
+			send(res, 202, await startAudioTranscodeJob(transcodeStartMatch[1], await readContentBody(req)));
 			return;
 		}
 		const transcodeDiscardMatch = url.pathname.match(/^\/api\/transcode\/jobs\/([0-9a-f-]{36})\/discard$/i);

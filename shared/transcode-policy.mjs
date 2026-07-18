@@ -89,6 +89,20 @@ export const TRANSCODE_PRESETS = Object.freeze({
 	videoCompatibility: Object.freeze({ kind: "video", label: "浏览器兼容转换", output: "mp4", maxHeight: null }),
 });
 
+export const TRANSCODE_AUDIO_PRESETS = Object.freeze({
+	"voice-aac": Object.freeze({ key: "voice-aac", label: "Voice AAC", kind: "audio", extension: "m4a", codec: "aac", targetBitrateKbps: 96 }),
+	"standard-aac": Object.freeze({ key: "standard-aac", label: "Standard AAC", kind: "audio", extension: "m4a", codec: "aac", targetBitrateKbps: 128 }),
+	"music-aac": Object.freeze({ key: "music-aac", label: "Music AAC", kind: "audio", extension: "m4a", codec: "aac", targetBitrateKbps: 192 }),
+	"compatible-mp3": Object.freeze({ key: "compatible-mp3", label: "Compatible MP3", kind: "audio", extension: "mp3", codec: "libmp3lame", targetBitrateKbps: 192 }),
+});
+
+export const TRANSCODE_AUDIO_OUTPUT = Object.freeze({
+	maxBytes: 50 * 1024 * 1024,
+	minimumTrustedLossyBitrateKbps: 24,
+	maximumTrustedLossyBitrateKbps: 768,
+	minimumOutputBitrateKbps: 24,
+});
+
 export const TRANSCODE_FUTURE_OUTPUT = Object.freeze({
 	videoCodec: "h264",
 	audioCodec: "aac",
@@ -125,6 +139,10 @@ export function isTerminalTranscodeState(value) {
 
 export function shouldLockTranscodeLibrarySource(value) {
 	return TRANSCODE_LIBRARY_LOCK_STATES.includes(value);
+}
+
+export function getTranscodeAudioPreset(value) {
+	return typeof value === "string" ? TRANSCODE_AUDIO_PRESETS[value] || null : null;
 }
 
 export function transitionTranscodeJobState(job, nextState, patch = {}, now = new Date().toISOString()) {

@@ -47,6 +47,7 @@ export function createTranscodeQueue({ runJob, onJobError = () => {} }) {
 			const index = pending.indexOf(jobId);
 			return index === -1 ? null : index + 1;
 		},
+		has(jobId) { return known.has(jobId); },
 		snapshot() {
 			return { activeId, pending: [...pending] };
 		},
