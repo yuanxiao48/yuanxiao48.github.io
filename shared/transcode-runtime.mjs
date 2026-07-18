@@ -15,13 +15,23 @@ export function createTranscodeQueue({ runJob, onJobError = () => {} }) {
 	let activeId = null;
 	let scheduling = false;
 	let closed = false;
+	const idleWaiters = new Set();
+
+	const notifyIdle = () => {
+		if (activeId || pending.length || scheduling) return;
+		for (const resolve of idleWaiters) resolve();
+		idleWaiters.clear();
+	};
 
 	const schedule = () => {
 		if (closed || scheduling || activeId || !pending.length) return;
 		scheduling = true;
 		queueMicrotask(async () => {
 			scheduling = false;
-			if (closed || activeId || !pending.length) return;
+			if (closed || activeId || !pending.length) {
+				notifyIdle();
+				return;
+			}
 			const jobId = pending.shift();
 			activeId = jobId;
 			try {
@@ -32,6 +42,7 @@ export function createTranscodeQueue({ runJob, onJobError = () => {} }) {
 				known.delete(jobId);
 				activeId = null;
 				if (!closed) schedule();
+				notifyIdle();
 			}
 		});
 	};
@@ -71,13 +82,15 @@ export function createTranscodeQueue({ runJob, onJobError = () => {} }) {
 			closed = true;
 			const pendingJobIds = pending.splice(0);
 			for (const jobId of pendingJobIds) known.delete(jobId);
+			notifyIdle();
 			return { closed: true, alreadyClosed: false, pendingJobIds };
 		},
 		snapshot() {
 			return { closed, activeId, pending: [...pending] };
 		},
-		async idle() {
-			while (activeId || pending.length || scheduling) await new Promise((resolve) => setTimeout(resolve, 0));
+		idle() {
+			if (!activeId && !pending.length && !scheduling) return Promise.resolve();
+			return new Promise((resolve) => idleWaiters.add(resolve));
 		},
 	});
 }
@@ -86,6 +99,10 @@ export function isStudioApiWriteRequest({ method, pathname }) {
 	return typeof pathname === "string"
 		&& pathname.startsWith("/api/")
 		&& ["POST", "PUT", "PATCH", "DELETE"].includes(String(method || "").toUpperCase());
+}
+
+export function withStudioShutdownConnectionClose(headers = {}) {
+	return Object.freeze({ ...headers, connection: "close" });
 }
 
 export function resolveTranscodeAttemptFinalization({ terminal = false, shutdownRequested = false, cancelRequested = false } = {}) {
@@ -115,10 +132,60 @@ export function shouldAwaitManagedChildClose(record) {
 	return Boolean(resolveManagedStopIntent(record || {}) && record?.processExitConfirmed !== true);
 }
 
-export function createStudioShutdownPreparation({ queue, recoverPending = async () => ({}), requestActiveShutdown = async () => ({}) }) {
+export function createStudioHttpRequestTracker() {
+	let activeRequestCount = 0;
+	const zeroWaiters = new Set();
+
+	const notifyZero = () => {
+		if (activeRequestCount !== 0) return;
+		for (const resolve of zeroWaiters) resolve();
+		zeroWaiters.clear();
+	};
+
+	return Object.freeze({
+		beginRequest() {
+			activeRequestCount += 1;
+			let settled = false;
+			return Object.freeze({
+				settle() {
+					if (settled) return false;
+					settled = true;
+					activeRequestCount = Math.max(0, activeRequestCount - 1);
+					notifyZero();
+					return true;
+				},
+			});
+		},
+		getActiveRequestCount() { return activeRequestCount; },
+		waitForZero() {
+			if (activeRequestCount === 0) return Promise.resolve();
+			return new Promise((resolve) => zeroWaiters.add(resolve));
+		},
+	});
+}
+
+export function createStudioShutdownPreparation({
+	queue,
+	recoverPending = async () => ({}),
+	requestActiveShutdown = async () => ({}),
+	closeHttp = async () => ({ ok: true, closed: true }),
+	closeIdleConnections = () => ({ ok: true }),
+	forceCloseHttp = () => ({ ok: true }),
+	waitForHttpRequests = async () => {},
+	waitForActiveSafety = async () => {},
+	processAdapter = { setExitCode() {}, forceExit() {} },
+	logger = () => {},
+	httpForceCloseDelayMs = 12_000,
+	globalDeadlineMs = 14_000,
+	setTimeoutImpl = setTimeout,
+	clearTimeoutImpl = clearTimeout,
+}) {
 	if (!queue || typeof queue.close !== "function") throw new TypeError("queue.close must be a function");
 	if (typeof recoverPending !== "function") throw new TypeError("recoverPending must be a function");
 	if (typeof requestActiveShutdown !== "function") throw new TypeError("requestActiveShutdown must be a function");
+	if (typeof closeHttp !== "function" || typeof closeIdleConnections !== "function" || typeof forceCloseHttp !== "function") throw new TypeError("HTTP shutdown callbacks must be functions");
+	if (typeof waitForHttpRequests !== "function" || typeof waitForActiveSafety !== "function") throw new TypeError("shutdown wait callbacks must be functions");
+	if (!processAdapter || typeof processAdapter.setExitCode !== "function" || typeof processAdapter.forceExit !== "function") throw new TypeError("processAdapter must provide setExitCode and forceExit");
 	const state = {
 		started: false,
 		acceptingWrites: true,
@@ -133,6 +200,31 @@ export function createStudioShutdownPreparation({ queue, recoverPending = async 
 		degradedCodes: [],
 		completed: false,
 		preparationPromise: null,
+		lifecycleStarted: false,
+		signalHandlersRegistered: false,
+		signalCount: 0,
+		httpIdleCloseRequested: false,
+		httpForceCloseRequested: false,
+		activeRequestCount: 0,
+		gracefulDeadlineReached: false,
+		forcedShutdownRequested: false,
+		awaitingChild: false,
+		awaitingHttp: false,
+		lifecycleResultSettled: false,
+		safeCompletionReached: false,
+		exitCode: null,
+		activeSafetySettled: false,
+		httpSafetySettled: false,
+		httpRequestsSettled: false,
+		lifecycleResultPromise: null,
+		safeCompletionPromise: null,
+		resolveLifecycleResult: null,
+		resolveSafeCompletion: null,
+		httpForceCloseTimer: null,
+		globalDeadlineTimer: null,
+		signalSource: null,
+		signalHandlers: null,
+		forceExitCalled: false,
 	};
 
 	const markDegraded = (code) => {
@@ -156,7 +248,108 @@ export function createStudioShutdownPreparation({ queue, recoverPending = async 
 		degradedCodes: Object.freeze([...state.degradedCodes]),
 		completed: state.completed,
 		preparationCompleted: state.preparationPromise !== null && state.pendingRecoveryCompleted,
+		lifecycleStarted: state.lifecycleStarted,
+		signalHandlersRegistered: state.signalHandlersRegistered,
+		signalCount: state.signalCount,
+		httpIdleCloseRequested: state.httpIdleCloseRequested,
+		httpForceCloseRequested: state.httpForceCloseRequested,
+		activeRequestCount: state.activeRequestCount,
+		gracefulDeadlineReached: state.gracefulDeadlineReached,
+		forcedShutdownRequested: state.forcedShutdownRequested,
+		awaitingChild: state.awaitingChild,
+		awaitingHttp: state.awaitingHttp,
+		lifecycleResultSettled: state.lifecycleResultSettled,
+		safeCompletionReached: state.safeCompletionReached,
+		exitCode: state.exitCode,
+		httpRequestsSettled: state.httpRequestsSettled,
 	});
+
+	const setExitCode = (code) => {
+		if (![0, 1].includes(code)) return false;
+		if (state.exitCode === 1 || state.exitCode === code) return false;
+		state.exitCode = code;
+		try { processAdapter.setExitCode(code); } catch { markDegraded("STUDIO_SHUTDOWN_INTERNAL_ERROR"); }
+		return true;
+	};
+
+	const clearLifecycleTimers = () => {
+		if (state.httpForceCloseTimer) clearTimeoutImpl(state.httpForceCloseTimer);
+		if (state.globalDeadlineTimer) clearTimeoutImpl(state.globalDeadlineTimer);
+		state.httpForceCloseTimer = null;
+		state.globalDeadlineTimer = null;
+	};
+
+	const removeTerminationHandlers = () => {
+		if (!state.signalHandlersRegistered || !state.signalSource || !state.signalHandlers) return false;
+		try {
+			state.signalSource.removeListener("SIGINT", state.signalHandlers.interrupt);
+			state.signalSource.removeListener("SIGTERM", state.signalHandlers.terminate);
+		} catch {
+			markDegraded("STUDIO_SHUTDOWN_INTERNAL_ERROR");
+			return false;
+		}
+		state.signalHandlersRegistered = false;
+		state.signalSource = null;
+		state.signalHandlers = null;
+		return true;
+	};
+
+	const settleLifecycleResult = (result) => {
+		if (state.lifecycleResultSettled) return false;
+		state.lifecycleResultSettled = true;
+		state.resolveLifecycleResult?.(Object.freeze(result));
+		return true;
+	};
+
+	const checkSafeCompletion = () => {
+		if (!state.lifecycleStarted || state.safeCompletionReached || !state.pendingRecoveryCompleted || !state.activeSafetySettled || !state.httpSafetySettled || !state.httpClosed) return false;
+		state.awaitingChild = false;
+		state.awaitingHttp = false;
+		state.safeCompletionReached = true;
+		state.completed = true;
+		clearLifecycleTimers();
+		removeTerminationHandlers();
+		state.resolveSafeCompletion?.(Object.freeze({ status: "completed", degraded: state.degraded, degradedCodes: [...state.degradedCodes] }));
+		settleLifecycleResult({ status: "completed", degraded: state.degraded, degradedCodes: [...state.degradedCodes] });
+		try { logger("Studio has shut down safely."); } catch { /* lifecycle logging is best effort */ }
+		return true;
+	};
+
+	const requestHttpForceClose = () => {
+		if (state.httpForceCloseRequested) return false;
+		state.httpForceCloseRequested = true;
+		markDegraded("STUDIO_HTTP_FORCE_CLOSE_REQUIRED");
+		setExitCode(1);
+		try {
+			const result = forceCloseHttp();
+			Promise.resolve(result).then((value) => {
+				if (value?.ok === false) markDegraded(value.code || "STUDIO_HTTP_CLOSE_TIMEOUT");
+			}).catch(() => markDegraded("STUDIO_HTTP_CLOSE_TIMEOUT"));
+		} catch {
+			markDegraded("STUDIO_HTTP_CLOSE_TIMEOUT");
+		}
+		return true;
+	};
+
+	const onGlobalDeadline = () => {
+		if (state.safeCompletionReached || state.gracefulDeadlineReached) return;
+		state.gracefulDeadlineReached = true;
+		state.globalDeadlineTimer = null;
+		state.awaitingChild = !state.activeSafetySettled;
+		state.awaitingHttp = !state.httpSafetySettled || !state.httpClosed;
+		if (state.awaitingChild) markDegraded("STUDIO_ACTIVE_SHUTDOWN_TIMEOUT");
+		if (state.awaitingHttp) {
+			markDegraded("STUDIO_HTTP_CLOSE_TIMEOUT");
+			requestHttpForceClose();
+		}
+		if (state.awaitingChild || state.awaitingHttp || state.degraded) setExitCode(1);
+		settleLifecycleResult({
+			status: "degraded",
+			awaitingChild: state.awaitingChild,
+			awaitingHttp: state.awaitingHttp,
+			degradedCodes: [...state.degradedCodes],
+		});
+	};
 
 	const begin = () => {
 		if (state.preparationPromise) return state.preparationPromise;
@@ -176,8 +369,15 @@ export function createStudioShutdownPreparation({ queue, recoverPending = async 
 			.catch(() => ({ ok: false, code: "TRANSCODE_SHUTDOWN_PENDING_RECOVERY_FAILED" }));
 		state.preparationPromise = Promise.all([active, recovery]).then(([activeResult, recoveryResult]) => {
 			state.pendingRecoveryCompleted = true;
-			if (activeResult?.ok === false) markDegraded(activeResult.code || "TRANSCODE_SHUTDOWN_ACTIVE_PREPARATION_FAILED");
-			if (recoveryResult?.ok === false) markDegraded(recoveryResult.code || "TRANSCODE_SHUTDOWN_PENDING_RECOVERY_FAILED");
+			if (activeResult?.ok === false) {
+				markDegraded(activeResult.code || "TRANSCODE_SHUTDOWN_ACTIVE_PREPARATION_FAILED");
+				if (state.lifecycleStarted) setExitCode(1);
+			}
+			if (recoveryResult?.ok === false) {
+				markDegraded(recoveryResult.code || "TRANSCODE_SHUTDOWN_PENDING_RECOVERY_FAILED");
+				if (state.lifecycleStarted) setExitCode(1);
+			}
+			checkSafeCompletion();
 			return {
 				ok: activeResult?.ok !== false && recoveryResult?.ok !== false,
 				queue: queueResult,
@@ -188,8 +388,110 @@ export function createStudioShutdownPreparation({ queue, recoverPending = async 
 		return state.preparationPromise;
 	};
 
+	const beginLifecycle = () => {
+		if (state.lifecycleResultPromise) return state.lifecycleResultPromise;
+		state.lifecycleStarted = true;
+		const preparation = begin();
+		state.lifecycleResultPromise = new Promise((resolve) => { state.resolveLifecycleResult = resolve; });
+		state.safeCompletionPromise = new Promise((resolve) => { state.resolveSafeCompletion = resolve; });
+		state.httpCloseStarted = true;
+		let closeResult;
+		try { closeResult = closeHttp(); }
+		catch { closeResult = { ok: false, code: "STUDIO_HTTP_CLOSE_TIMEOUT" }; }
+		let idleResult;
+		state.httpIdleCloseRequested = true;
+		try { idleResult = closeIdleConnections(); }
+		catch { idleResult = { ok: false, code: "STUDIO_HTTP_CLOSE_TIMEOUT" }; }
+		Promise.resolve(idleResult).then((value) => {
+			if (value?.ok === false) {
+				markDegraded(value.code || "STUDIO_HTTP_CLOSE_TIMEOUT");
+				setExitCode(1);
+			}
+		}).catch(() => { markDegraded("STUDIO_HTTP_CLOSE_TIMEOUT"); setExitCode(1); });
+		const closePromise = Promise.resolve(closeResult).then((value) => {
+			if (value?.ok === false) {
+				markDegraded(value.code || "STUDIO_HTTP_CLOSE_TIMEOUT");
+				setExitCode(1);
+			} else if (value?.closed === true) {
+				state.httpClosed = true;
+			}
+			return value;
+		}).catch(() => {
+			markDegraded("STUDIO_HTTP_CLOSE_TIMEOUT");
+			setExitCode(1);
+			return { ok: false };
+		});
+		Promise.all([closePromise, Promise.resolve().then(waitForHttpRequests).catch(() => ({ ok: false }))])
+			.then(([, requestResult]) => {
+				if (requestResult?.ok === false) {
+					markDegraded("STUDIO_HTTP_CLOSE_TIMEOUT");
+					setExitCode(1);
+				}
+				state.activeRequestCount = 0;
+				state.httpRequestsSettled = true;
+				state.httpSafetySettled = state.httpClosed;
+				checkSafeCompletion();
+			});
+		Promise.resolve().then(waitForActiveSafety)
+			.then((value) => {
+				if (value?.ok === false) {
+					markDegraded(value.code || "STUDIO_ACTIVE_SHUTDOWN_TIMEOUT");
+					setExitCode(1);
+				}
+				state.activeSafetySettled = value?.ok !== false;
+				checkSafeCompletion();
+			}).catch(() => {
+				markDegraded("STUDIO_ACTIVE_SHUTDOWN_TIMEOUT");
+				setExitCode(1);
+			});
+		state.httpForceCloseTimer = setTimeoutImpl(() => {
+			state.httpForceCloseTimer = null;
+			if (!state.httpSafetySettled || !state.httpClosed) requestHttpForceClose();
+		}, httpForceCloseDelayMs);
+		state.globalDeadlineTimer = setTimeoutImpl(onGlobalDeadline, globalDeadlineMs);
+		preparation.catch(() => {});
+		return state.lifecycleResultPromise;
+	};
+
+	const handleTerminationRequest = () => {
+		state.signalCount += 1;
+		if (state.signalCount === 1) {
+			try { logger("Studio is shutting down."); } catch { /* lifecycle logging is best effort */ }
+			return beginLifecycle();
+		}
+		if (state.signalCount === 2) {
+			state.forcedShutdownRequested = true;
+			setExitCode(1);
+			requestHttpForceClose();
+			try { logger("A second shutdown request was received. Studio will exit forcefully."); } catch { /* lifecycle logging is best effort */ }
+			if (!state.forceExitCalled) {
+				state.forceExitCalled = true;
+				try { processAdapter.forceExit(1); } catch { markDegraded("STUDIO_SHUTDOWN_INTERNAL_ERROR"); }
+			}
+		}
+		return state.lifecycleResultPromise || Promise.resolve(Object.freeze({ status: "not-started" }));
+	};
+
+	const registerTerminationHandlers = (signalSource) => {
+		if (state.signalHandlersRegistered) return false;
+		if (!signalSource || typeof signalSource.on !== "function" || typeof signalSource.removeListener !== "function") throw new TypeError("signalSource must provide on and removeListener");
+		const interrupt = () => { Promise.resolve(handleTerminationRequest()).catch(() => markDegraded("STUDIO_SHUTDOWN_INTERNAL_ERROR")); };
+		const terminate = () => { Promise.resolve(handleTerminationRequest()).catch(() => markDegraded("STUDIO_SHUTDOWN_INTERNAL_ERROR")); };
+		signalSource.on("SIGINT", interrupt);
+		signalSource.on("SIGTERM", terminate);
+		state.signalSource = signalSource;
+		state.signalHandlers = { interrupt, terminate };
+		state.signalHandlersRegistered = true;
+		return true;
+	};
+
 	return Object.freeze({
 		begin,
+		beginLifecycle,
+		handleTerminationRequest,
+		registerTerminationHandlers,
+		removeTerminationHandlers,
+		getSafeCompletionPromise() { return state.safeCompletionPromise; },
 		isAcceptingWrites() { return state.acceptingWrites; },
 		isStarted() { return state.started; },
 		isQueueClosed() { return state.queueClosed; },
@@ -206,6 +508,15 @@ export function createStudioShutdownPreparation({ queue, recoverPending = async 
 		markHttpClosed() {
 			if (state.httpClosed) return false;
 			state.httpClosed = true;
+			if (state.httpRequestsSettled) state.httpSafetySettled = true;
+			checkSafeCompletion();
+			return true;
+		},
+		setActiveRequestCount(count) {
+			const next = Number.isSafeInteger(count) && count >= 0 ? count : state.activeRequestCount;
+			if (next === state.activeRequestCount) return false;
+			state.activeRequestCount = next;
+			checkSafeCompletion();
 			return true;
 		},
 		markDegraded,
@@ -316,6 +627,12 @@ export function createTranscodeOperationGuard() {
 export function createManagedTranscodeProcesses({ stderrLimit = DEFAULT_STDERR_LIMIT } = {}) {
 	const records = new Map();
 	const pendingShutdownIntents = new Map();
+	const idleWaiters = new Set();
+	const notifyIdle = () => {
+		if (records.size !== 0) return;
+		for (const resolve of idleWaiters) resolve();
+		idleWaiters.clear();
+	};
 	const createRecord = (jobId, attempt, { executionStarted = false } = {}) => ({
 		jobId,
 		attempt,
@@ -521,6 +838,7 @@ export function createManagedTranscodeProcesses({ stderrLimit = DEFAULT_STDERR_L
 			if (record.forceKillConfirmationTimer) clearTimeout(record.forceKillConfirmationTimer);
 			records.delete(jobId);
 			pendingShutdownIntents.delete(jobId);
+			notifyIdle();
 			return record;
 		},
 		clear() {
@@ -530,6 +848,11 @@ export function createManagedTranscodeProcesses({ stderrLimit = DEFAULT_STDERR_L
 			}
 			records.clear();
 			pendingShutdownIntents.clear();
+			notifyIdle();
+		},
+		waitForIdle() {
+			if (records.size === 0) return Promise.resolve();
+			return new Promise((resolve) => idleWaiters.add(resolve));
 		},
 	});
 }

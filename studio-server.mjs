@@ -63,6 +63,7 @@ import {
 	createManagedTranscodeStopCoordinator,
 	createManagedTranscodeProcesses,
 	createProgressPersistence,
+	createStudioHttpRequestTracker,
 	createStudioShutdownPreparation,
 	removeFilesWithRetry,
 	resolveManagedStopIntent,
@@ -71,6 +72,7 @@ import {
 	createTranscodeOperationGuard,
 	createTranscodeQueue,
 	isStudioApiWriteRequest,
+	withStudioShutdownConnectionClose,
 } from "./shared/transcode-runtime.mjs";
 import { forceKillWindowsProcessTree } from "./shared/windows-process-control.mjs";
 
@@ -119,6 +121,7 @@ const STUDIO_SESSION_TOKEN = randomUUID();
 const activeTranscodeSourceLocks = new Map();
 const transcodeJobOperationGuard = createTranscodeOperationGuard();
 const managedTranscodeProcesses = createManagedTranscodeProcesses();
+const studioHttpRequestTracker = createStudioHttpRequestTracker();
 const managedForceKillCoordinator = createManagedForceKillCoordinator({
 	processes: managedTranscodeProcesses,
 	forceKill: forceKillWindowsProcessTree,
@@ -145,6 +148,16 @@ const studioShutdownPreparation = createStudioShutdownPreparation({
 	queue: transcodeQueue,
 	recoverPending: (pendingJobIds) => recoverQueuedTranscodeJobsForShutdown(pendingJobIds),
 	requestActiveShutdown: () => requestActiveTranscodeShutdownIntent(),
+	closeHttp: () => requestStudioHttpClose(),
+	closeIdleConnections: () => requestStudioHttpIdleClose(),
+	forceCloseHttp: () => requestStudioHttpForceClose(),
+	waitForHttpRequests: () => studioHttpRequestTracker.waitForZero(),
+	waitForActiveSafety: () => waitForActiveTranscodeShutdownSafety(),
+	processAdapter: {
+		setExitCode(code) { process.exitCode = code; },
+		forceExit(code) { process.exit(code); },
+	},
+	logger(message) { console.log(message); },
 });
 
 let previewMarkdownRendererPromise;
@@ -1491,6 +1504,64 @@ function assertStudioAcceptingApiWrites(req, url) {
 
 function beginStudioShutdownPreparation() {
 	return studioShutdownPreparation.begin();
+}
+
+function waitForActiveTranscodeShutdownSafety() {
+	return Promise.all([
+		transcodeQueue.idle(),
+		managedTranscodeProcesses.waitForIdle(),
+	]).then(() => ({ ok: true }));
+}
+
+function requestStudioHttpClose() {
+	return new Promise((resolve) => {
+		try {
+			server.close((error) => {
+				if (error) {
+					resolve({ ok: false, code: "STUDIO_HTTP_CLOSE_TIMEOUT" });
+					return;
+				}
+				studioShutdownPreparation.markHttpClosed();
+				resolve({ ok: true, closed: true });
+			});
+		} catch {
+			resolve({ ok: false, code: "STUDIO_HTTP_CLOSE_TIMEOUT" });
+		}
+	});
+}
+
+function requestStudioHttpIdleClose() {
+	if (typeof server.closeIdleConnections !== "function") return { ok: true, skipped: true };
+	try {
+		server.closeIdleConnections();
+		return { ok: true };
+	} catch {
+		return { ok: false, code: "STUDIO_HTTP_CLOSE_TIMEOUT" };
+	}
+}
+
+function requestStudioHttpForceClose() {
+	if (typeof server.closeAllConnections !== "function") return { ok: false, code: "STUDIO_HTTP_CLOSE_TIMEOUT" };
+	try {
+		server.closeAllConnections();
+		return { ok: true };
+	} catch {
+		return { ok: false, code: "STUDIO_HTTP_CLOSE_TIMEOUT" };
+	}
+}
+
+function trackStudioHttpRequest(req, res) {
+	const request = studioHttpRequestTracker.beginRequest();
+	studioShutdownPreparation.setActiveRequestCount(studioHttpRequestTracker.getActiveRequestCount());
+	const settle = () => {
+		if (!request.settle()) return false;
+		studioShutdownPreparation.setActiveRequestCount(studioHttpRequestTracker.getActiveRequestCount());
+		return true;
+	};
+	res.once("finish", settle);
+	res.once("close", settle);
+	req.once("aborted", settle);
+	return settle;
 }
 
 function toolVersionLine(output) {
@@ -4324,6 +4395,7 @@ async function restorePost(trashPath) {
 }
 
 const server = createServer(async (req, res) => {
+	const settleRequest = trackStudioHttpRequest(req, res);
 	try {
 		const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
 		assertStudioAcceptingApiWrites(req, url);
@@ -4554,12 +4626,19 @@ const server = createServer(async (req, res) => {
 		send(res, 404, { ok: false, code: "NOT_FOUND", error: "Not found" });
 	} catch (error) {
 		const known = error instanceof StudioError;
-		send(res, known ? error.status : 500, {
-			ok: false,
-			code: known ? error.code : "STUDIO_INTERNAL_ERROR",
-			error: known ? error.message : "Studio request failed safely",
-			...(known && error.details ? { details: error.details } : {}),
-		});
+		if (!res.writableEnded && !res.destroyed) {
+			const headers = known && error.code === "STUDIO_SHUTTING_DOWN"
+				? withStudioShutdownConnectionClose(jsonHeaders)
+				: jsonHeaders;
+			send(res, known ? error.status : 500, {
+				ok: false,
+				code: known ? error.code : "STUDIO_INTERNAL_ERROR",
+				error: known ? error.message : "Studio request failed safely",
+				...(known && error.details ? { details: error.details } : {}),
+			}, headers);
+		}
+	} finally {
+		if (res.writableEnded || res.destroyed) settleRequest();
 	}
 });
 
@@ -4573,6 +4652,7 @@ cleanupStaleMediaTemps()
 	.catch((error) => console.warn("Studio transcode task cleanup skipped:", error.message))
 	.finally(() => {
 		server.listen(port, "127.0.0.1", () => {
+			studioShutdownPreparation.registerTerminationHandlers(process);
 			console.log(`Blog Studio: http://127.0.0.1:${port}/`);
 			console.log("Keep this window open while editing.");
 		});
