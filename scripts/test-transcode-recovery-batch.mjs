@@ -72,4 +72,42 @@ assert.deepEqual(order, [
 ]);
 assert.equal(jobs.get(ids[2]).state, "ready");
 
+{
+	const heldIds = ["66666666-6666-4666-8666-666666666666", "77777777-7777-4777-8777-777777777777"];
+	const heldJobs = new Map(heldIds.map((id) => [id, {
+		id,
+		state: "interrupted",
+		runtime: { attempt: 0 },
+		recoveryHold: { version: 1, active: true, code: "TRANSCODE_RECOVERY_OUTPUT_UNCONFIRMED", detectedAt: "2026-07-18T00:00:00.000Z", lastCheckedAt: "2026-07-18T00:00:00.000Z", retryAfter: "2026-07-18T00:00:00.000Z" },
+	}]));
+	const sessions = [];
+	const heldExecutor = createTranscodeRecoveryExecutor({
+		readJob: async (jobId) => ({ job: structuredClone(heldJobs.get(jobId)), identity: `held-${jobId}`, generation: 0 }),
+		persistJobAtomic: async ({ jobId, nextManifest }) => { heldJobs.set(jobId, structuredClone(nextManifest)); return { ok: true }; },
+		inspectFixedOutputs: async () => ({
+			ok: true,
+			jobDirectory: { identity: { kind: "directory", dev: "n:1", ino: "n:10", mtimeMs: nowMs - 180_000, ctimeMs: nowMs - 180_000, birthtimeMs: nowMs - 300_000 } },
+			outputDirectory: { present: false, identity: null },
+			files: {
+				"output.partial.m4a": { present: false, identity: null }, "output.partial.mp3": { present: false, identity: null },
+				"output.m4a": { present: false, identity: null }, "output.mp3": { present: false, identity: null },
+			},
+		}),
+		removeFixedOutput: async () => ({ status: "alreadyAbsent" }),
+		nowIso: () => nowIso,
+		wallNowMs: () => nowMs,
+		monotonicNowMs: () => 0,
+		createSchedulerSession: () => {
+			const offsets = [];
+			sessions.push(offsets);
+			return { sleepUntilOffset: async (offset) => { offsets.push(offset); }, dispose() {} };
+		},
+		acquireRecoveryGuard: async () => async () => {},
+	});
+	const heldContext = createStartupRecoveryContext({ startupIdentity: "held-batch", startupWallTimeMs: nowMs, preexistingHoldJobIds: heldIds });
+	const heldResult = await heldExecutor.recoverBatch({ jobIds: heldIds, context: heldContext });
+	assert.equal(heldResult.items.length, 2);
+	assert.deepEqual(sessions, [[0, 2_000, 8_000, 20_000], [0, 2_000, 8_000, 20_000]]);
+}
+
 console.log("transcode recovery batch tests passed");

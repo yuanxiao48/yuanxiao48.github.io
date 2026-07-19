@@ -239,8 +239,17 @@ function createRetainedHoldManifest(job, nowIso, wallNowMs, warningCode) {
 }
 
 function requiredDependencies(dependencies) {
-	const names = ["readJob", "persistJobAtomic", "inspectFixedOutputs", "removeFixedOutput", "nowIso", "wallNowMs", "monotonicNowMs", "scheduler", "acquireRecoveryGuard"];
-	return names.every((name) => typeof dependencies?.[name] === "function" || (name === "scheduler" && typeof dependencies?.scheduler?.sleepUntilOffset === "function"));
+	const names = ["readJob", "persistJobAtomic", "inspectFixedOutputs", "removeFixedOutput", "nowIso", "wallNowMs", "monotonicNowMs", "acquireRecoveryGuard"];
+	return names.every((name) => typeof dependencies?.[name] === "function")
+		&& (typeof dependencies?.createSchedulerSession === "function" || typeof dependencies?.scheduler?.sleepUntilOffset === "function");
+}
+
+function createSchedulerSession(dependencies) {
+	const scheduler = typeof dependencies.createSchedulerSession === "function"
+		? dependencies.createSchedulerSession()
+		: dependencies.scheduler;
+	if (!scheduler || typeof scheduler.sleepUntilOffset !== "function") throw new Error("Recovery scheduler session is invalid");
+	return scheduler;
 }
 
 async function resolveGuard(acquireRecoveryGuard, jobId) {
@@ -322,11 +331,18 @@ export function createTranscodeRecoveryExecutor(dependencies) {
 		if (!eligibility.eligible) {
 			return result({ status: "holdRetained", jobId, holdActive: true, lockRequired: true, code: eligibility.reasonCode });
 		}
-		const snapshots = await collectRecoverySnapshots({
-			inspect: async () => dependencies.inspectFixedOutputs({ jobId, job, context }),
-			scheduler: dependencies.scheduler,
-			monotonicNowMs: dependencies.monotonicNowMs,
-		});
+		let scheduler = null;
+		let snapshots;
+		try {
+			scheduler = createSchedulerSession(dependencies);
+			snapshots = await collectRecoverySnapshots({
+				inspect: async () => dependencies.inspectFixedOutputs({ jobId, job, context }),
+				scheduler,
+				monotonicNowMs: dependencies.monotonicNowMs,
+			});
+		} finally {
+			if (scheduler && typeof scheduler.dispose === "function") scheduler.dispose();
+		}
 		const evaluated = evaluateRecoverySnapshots({
 			snapshots,
 			hold: hold.hold,

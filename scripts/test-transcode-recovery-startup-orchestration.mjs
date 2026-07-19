@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createTranscodeStartupRecoveryOrchestrator } from "../shared/transcode-recovery-startup-adapter.mjs";
+import { createTranscodeStartupRecoveryOrchestrator, withFinalRecoverySnapshots } from "../shared/transcode-recovery-startup-adapter.mjs";
 
 const heldId = "11111111-1111-4111-8111-111111111111";
 const normalId = "22222222-2222-4222-8222-222222222222";
@@ -43,11 +43,15 @@ const [first, second] = await Promise.all([orchestrator.run(), orchestrator.run(
 assert.equal(first, second);
 assert.equal(first.status, "degradedHeldJobs");
 assert.equal(first.requiresLockPlanning, true);
+assert.equal(first.finalSnapshotReady, true);
 assert.equal("canListen" in first, false);
 assert.equal(JSON.stringify(first).includes("startup-test"), false);
 assert.equal(discoveryCalls, 1);
 assert.equal(executorCalls, 1);
-assert.deepEqual(events, [`read:${heldId}`, `read:${normalId}`, "batch"]);
+assert.deepEqual(events, [`read:${heldId}`, `read:${normalId}`, "batch", `read:${heldId}`, `read:${normalId}`]);
+const finalCollection = orchestrator.getFinalSnapshotCollection();
+assert.equal(JSON.stringify(finalCollection).includes(heldId), false);
+assert.equal(withFinalRecoverySnapshots(finalCollection, (snapshots) => snapshots.length), 2);
 
 const blocked = createTranscodeStartupRecoveryOrchestrator({
 	discoverJobIds: async () => [heldId],

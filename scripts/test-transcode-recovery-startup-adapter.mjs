@@ -52,16 +52,17 @@ const scheduler = createRecoveryOffsetScheduler({
 	},
 	clearTimer: (id) => timers.delete(id),
 });
-const firstWait = scheduler.sleepUntilOffset(0);
+const session = scheduler.createSession();
+const firstWait = session.sleepUntilOffset(0);
 assert.equal(timers.size, 1);
 for (const { callback } of timers.values()) callback();
 await firstWait;
 now = 2000;
-const secondWait = scheduler.sleepUntilOffset(2000);
+const secondWait = session.sleepUntilOffset(2000);
 for (const { callback } of timers.values()) callback();
 await secondWait;
-assert.equal(scheduler.getPendingCount(), 0);
-await assert.rejects(() => scheduler.sleepUntilOffset(20000));
-scheduler.dispose();
+assert.equal(session.getPendingCount(), 0);
+await assert.rejects(() => session.sleepUntilOffset(20000));
+session.dispose();
 
 console.log("transcode recovery startup adapter tests passed");

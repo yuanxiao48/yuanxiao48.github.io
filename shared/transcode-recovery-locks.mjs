@@ -27,7 +27,7 @@ const lockViews = new WeakSet();
 
 const TERMINAL_PROTECTED_STATES = new Set(["completed", "cancelled", "failed", "discarded"]);
 const JOB_READ_OPERATIONS = new Set(["read", "summary", "source-probe-readonly"]);
-const JOB_MUTATION_OPERATIONS = new Set(["start", "retry", "cancel", "discard", "delete", "cleanup"]);
+const JOB_MUTATION_OPERATIONS = new Set(["start", "retry", "cancel", "discard", "delete", "cleanup", "incomplete-upload-safe-discard"]);
 const SOURCE_READ_OPERATIONS = new Set(["read", "listing"]);
 const SOURCE_MUTATION_OPERATIONS = new Set([
 	"from-library",
@@ -352,6 +352,12 @@ export function getTranscodeRecoveryOperationConflict(job, operation) {
 	if (!known) return conflict("reject", OPERATION_FAILURE_CODE);
 	if (isTerminalProtected(job) || JOB_READ_OPERATIONS.has(operation)) return conflict("allow");
 	const fields = recoveryFieldState(job);
+	if (operation === "incomplete-upload-safe-discard") {
+		const allowed = job?.sourceType === "upload"
+			&& fields.preExecutionCode === "TRANSCODE_RECOVERY_INCOMPLETE_UPLOAD"
+			&& !fields.hasRecoveryHold && !fields.malformedRecoveryHold && !fields.malformedPreExecution;
+		return allowed ? conflict("allow") : conflict("reject", TRANSCODE_RECOVERY_CONFLICT_CODE);
+	}
 	const protectedByRecovery = fields.hasRecoveryHold || fields.malformedRecoveryHold || Boolean(fields.preExecutionCode) || fields.malformedPreExecution;
 	if (!protectedByRecovery) return conflict("allow");
 	if (operation === "retention-cleanup") return conflict("skip", TRANSCODE_RECOVERY_CONFLICT_CODE);

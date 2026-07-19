@@ -25,7 +25,10 @@ const RECOVERY_CODES = Object.freeze({
 	write: "TRANSCODE_RECOVERY_MANIFEST_WRITE_FAILED",
 	lock: "TRANSCODE_RECOVERY_OPERATION_LOCK_FAILED",
 	terminal: "TRANSCODE_RECOVERY_TERMINAL_PROTECTED",
+	finalSnapshot: "RECOVERY_FINAL_SNAPSHOT_UNAVAILABLE",
+	finalSnapshotRead: "RECOVERY_FINAL_SNAPSHOT_READ_FAILED",
 });
+const finalSnapshotCollections = new WeakMap();
 
 function freeze(value) {
 	return Object.freeze(value);
@@ -48,6 +51,31 @@ function deepFreeze(value, seen = new Set()) {
 
 function copyFrozen(value) {
 	return deepFreeze(structuredClone(value));
+}
+
+function copyFinalSnapshot(snapshot) {
+	return freeze({
+		job: copyFrozen(snapshot.job),
+		identity: snapshot.identity,
+		generation: snapshot.generation,
+	});
+}
+
+function createFinalSnapshotCollection(snapshots) {
+	const collection = freeze({ kind: "transcode-recovery-final-snapshots" });
+	finalSnapshotCollections.set(collection, freeze(snapshots.map(copyFinalSnapshot)));
+	return collection;
+}
+
+/**
+ * Gives a trusted internal consumer an immutable copy of final recovery
+ * snapshots. The opaque collection has no iterator and no serializable data.
+ */
+export function withFinalRecoverySnapshots(collection, callback) {
+	if (!finalSnapshotCollections.has(collection) || typeof callback !== "function") {
+		throw new TypeError(RECOVERY_CODES.finalSnapshot);
+	}
+	return callback(freeze([...finalSnapshotCollections.get(collection)]));
 }
 
 function bytesFrom(value) {
@@ -235,28 +263,12 @@ export function createRecoveryOffsetScheduler({ monotonicNowMs, setTimer = setTi
 	if (typeof monotonicNowMs !== "function" || typeof setTimer !== "function" || typeof clearTimer !== "function") {
 		throw new TypeError("Recovery scheduler dependencies are invalid");
 	}
-	let base = null;
-	let nextIndex = 0;
-	let disposed = false;
-	const pending = new Map();
-	return freeze({
-		sleepUntilOffset(offsetMs) {
-			if (disposed || offsetMs !== TRANSCODE_RECOVERY_POLICY.sampleOffsetsMs[nextIndex]) {
-				return Promise.reject(new Error(RECOVERY_CODES.invalid));
-			}
-			nextIndex += 1;
-			if (base === null) base = monotonicNowMs();
-			const delay = Math.max(0, base + offsetMs - monotonicNowMs());
-			return new Promise((resolve, reject) => {
-				const timer = setTimer(() => {
-					pending.delete(timer);
-					if (disposed) reject(new Error(RECOVERY_CODES.invalid));
-					else resolve();
-				}, delay);
-				pending.set(timer, reject);
-			});
-		},
-		dispose() {
+	function createSession() {
+		let base = null;
+		let nextIndex = 0;
+		let disposed = false;
+		const pending = new Map();
+		function cancel() {
 			if (disposed) return;
 			disposed = true;
 			for (const [timer, reject] of pending) {
@@ -264,9 +276,30 @@ export function createRecoveryOffsetScheduler({ monotonicNowMs, setTimer = setTi
 				reject(new Error(RECOVERY_CODES.invalid));
 			}
 			pending.clear();
-		},
-		getPendingCount() { return pending.size; },
-	});
+		}
+		return freeze({
+			sleepUntilOffset(offsetMs) {
+				if (disposed || offsetMs !== TRANSCODE_RECOVERY_POLICY.sampleOffsetsMs[nextIndex]) {
+					return Promise.reject(new Error(RECOVERY_CODES.invalid));
+				}
+				nextIndex += 1;
+				if (base === null) base = monotonicNowMs();
+				const delay = Math.max(0, base + offsetMs - monotonicNowMs());
+				return new Promise((resolve, reject) => {
+					const timer = setTimer(() => {
+						pending.delete(timer);
+						if (disposed) reject(new Error(RECOVERY_CODES.invalid));
+						else resolve();
+					}, delay);
+					pending.set(timer, reject);
+				});
+			},
+			cancel,
+			dispose: cancel,
+			getPendingCount() { return pending.size; },
+		});
+	}
+	return freeze({ createSession });
 }
 
 function safeBatchSummary(batch) {
@@ -297,16 +330,43 @@ export function createTranscodeStartupRecoveryOrchestrator(dependencies = {}) {
 	}
 	const createIdentity = typeof dependencies.createStartupIdentity === "function" ? dependencies.createStartupIdentity : randomUUID;
 	let runPromise = null;
+	let finalSnapshotCollection = null;
+
+	function summary({ status, totalJobs, recoveryCompleted, requiresLockPlanning, mustBlockListen, criticalCount, batchResult, finalSnapshotReady = false } = {}) {
+		return freeze({
+			status,
+			totalJobs,
+			recoveryCompleted,
+			requiresLockPlanning,
+			mustBlockListen,
+			criticalCount,
+			batchResult,
+			finalSnapshotReady,
+		});
+	}
+
+	async function readFinalSnapshots(jobIds) {
+		const snapshots = [];
+		for (const jobId of jobIds) {
+			const snapshot = await dependencies.readJob(jobId);
+			if (!isRecord(snapshot) || !isRecord(snapshot.job) || snapshot.job.id !== jobId
+				|| !isRecordIdentity(snapshot.identity) || !validExpectedGeneration(snapshot.generation)) {
+				throw new Error(RECOVERY_CODES.finalSnapshotRead);
+			}
+			snapshots.push(snapshot);
+		}
+		return snapshots;
+	}
 
 	async function runOnce() {
 		let jobIds;
 		try {
 			jobIds = await dependencies.discoverJobIds();
 		} catch {
-			return freeze({ status: "blockedBeforeRecovery", totalJobs: 0, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
+			return summary({ status: "blockedBeforeRecovery", totalJobs: 0, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
 		}
 		if (!Array.isArray(jobIds) || !jobIds.every(isSafeJobId)) {
-			return freeze({ status: "blockedBeforeRecovery", totalJobs: 0, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
+			return summary({ status: "blockedBeforeRecovery", totalJobs: 0, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
 		}
 		const snapshots = [];
 		try {
@@ -319,7 +379,7 @@ export function createTranscodeStartupRecoveryOrchestrator(dependencies = {}) {
 				snapshots.push(snapshot);
 			}
 		} catch {
-			return freeze({ status: "blockedBeforeRecovery", totalJobs: jobIds.length, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
+			return summary({ status: "blockedBeforeRecovery", totalJobs: jobIds.length, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
 		}
 		const preexistingHoldJobIds = snapshots
 			.filter((record) => record?.job?.state !== "completed" && (() => {
@@ -338,22 +398,27 @@ export function createTranscodeStartupRecoveryOrchestrator(dependencies = {}) {
 				preexistingHoldJobIds,
 			});
 		} catch {
-			return freeze({ status: "blockedBeforeRecovery", totalJobs: jobIds.length, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
+			return summary({ status: "blockedBeforeRecovery", totalJobs: jobIds.length, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
 		}
 		let batch;
 		try {
 			batch = await dependencies.createExecutor().recoverBatch({ jobIds, context });
 		} catch {
-			return freeze({ status: "blockedAfterRecovery", totalJobs: jobIds.length, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
+			return summary({ status: "blockedAfterRecovery", totalJobs: jobIds.length, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
 		}
 		const batchResult = safeBatchSummary(batch);
 		if (batchResult.mustBlockListen) {
-			return freeze({ status: "blockedAfterRecovery", totalJobs: jobIds.length, recoveryCompleted: true, requiresLockPlanning: false, mustBlockListen: true, criticalCount: batchResult.critical, batchResult });
+			return summary({ status: "blockedAfterRecovery", totalJobs: jobIds.length, recoveryCompleted: true, requiresLockPlanning: false, mustBlockListen: true, criticalCount: batchResult.critical, batchResult });
 		}
-		if (jobIds.length === 0) return freeze({ status: "noJobs", totalJobs: 0, recoveryCompleted: true, requiresLockPlanning: false, mustBlockListen: false, criticalCount: 0, batchResult });
+		try {
+			finalSnapshotCollection = createFinalSnapshotCollection(await readFinalSnapshots(jobIds));
+		} catch {
+			return summary({ status: "blockedAfterRecovery", totalJobs: jobIds.length, recoveryCompleted: true, requiresLockPlanning: false, mustBlockListen: true, criticalCount: Math.max(1, batchResult.critical), batchResult });
+		}
+		if (jobIds.length === 0) return summary({ status: "noJobs", totalJobs: 0, recoveryCompleted: true, requiresLockPlanning: false, mustBlockListen: false, criticalCount: 0, batchResult, finalSnapshotReady: true });
 		const held = batchResult.initialHolds + batchResult.retainedHolds + batchResult.partial + batchResult.preExecution;
 		const terminalOnly = batchResult.protected === jobIds.length;
-		return freeze({
+		return summary({
 			status: terminalOnly ? "terminalOnly" : held ? "degradedHeldJobs" : "readyForLockPlanning",
 			totalJobs: jobIds.length,
 			recoveryCompleted: true,
@@ -361,6 +426,7 @@ export function createTranscodeStartupRecoveryOrchestrator(dependencies = {}) {
 			mustBlockListen: false,
 			criticalCount: 0,
 			batchResult,
+			finalSnapshotReady: true,
 		});
 	}
 
@@ -368,6 +434,10 @@ export function createTranscodeStartupRecoveryOrchestrator(dependencies = {}) {
 		run() {
 			runPromise ||= runOnce();
 			return runPromise;
+		},
+		getFinalSnapshotCollection() {
+			if (!runPromise || !finalSnapshotCollection) throw new Error(RECOVERY_CODES.finalSnapshot);
+			return finalSnapshotCollection;
 		},
 	});
 }
