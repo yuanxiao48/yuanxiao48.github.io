@@ -3,6 +3,7 @@
  * adapters own source validation, persistence, argv construction, and child
  * process control. This module only owns the known-child safety boundary.
  */
+import { isTranscodeDirectProbeManagedPermitConsumer } from "./transcode-direct-probe-protection.mjs";
 
 const permits = new WeakMap();
 const consumers = new WeakSet();
@@ -117,8 +118,14 @@ function createPermit(authority, details) {
  * journal transaction keeps the issuer private and gives only the consumer to
  * the lifecycle manager.
  */
-export function createManagedSourceProbePermitAuthority() {
+export function createManagedSourceProbePermitAuthority({ directProtectionConsumer = null } = {}) {
+	if (directProtectionConsumer !== null && (!isTranscodeDirectProbeManagedPermitConsumer(directProtectionConsumer) || typeof directProtectionConsumer.consume !== "function" || typeof directProtectionConsumer.bind !== "function")) {
+		throw new TypeError("Managed source probe direct protection consumer is invalid");
+	}
 	const authority = {};
+	if (directProtectionConsumer !== null && directProtectionConsumer.bind(authority) !== true) {
+		throw new TypeError("Managed source probe direct protection consumer is already bound");
+	}
 	const consume = (permit) => {
 		const details = permits.get(permit);
 		if (!details || details.authority !== authority) return freeze({ ok: false, code: MANAGED_SOURCE_PROBE_CODES.permitInvalid });
@@ -147,8 +154,23 @@ export function createManagedSourceProbePermitAuthority() {
 			mintOutputValidationPermit(callbacks = {}) {
 				return mint("output-validation", "ephemeral-output-validation", callbacks);
 			},
-			mintDirectLibrarySourcePermit() {
-				return freeze({ ok: false, code: MANAGED_SOURCE_PROBE_CODES.directProtectionUnavailable, permit: null });
+			mintDirectLibrarySourcePermit({ directClaim } = {}) {
+				if (directProtectionConsumer === null) return freeze({ ok: false, code: MANAGED_SOURCE_PROBE_CODES.directProtectionUnavailable, permit: null });
+				return (async () => {
+					const claimed = directProtectionConsumer.consume(directClaim, authority);
+					if (!claimed?.ok || !validCallbacks(claimed.bindings) || typeof claimed.compensate !== "function") {
+						if (typeof claimed?.compensate === "function") {
+							try { await claimed.compensate(); } catch { /* retained protection stays conservative */ }
+						}
+						return freeze({ ok: false, code: claimed?.code || MANAGED_SOURCE_PROBE_CODES.permitInvalid, permit: null });
+					}
+					try {
+						return mint("direct-library-source", "persistent-direct-journal-reader", claimed.bindings);
+					} catch {
+						try { await claimed.compensate(); } catch { /* retained protection stays conservative */ }
+						return freeze({ ok: false, code: MANAGED_SOURCE_PROBE_CODES.permitInvalid, permit: null });
+					}
+				})();
 			},
 		}),
 		consumer,

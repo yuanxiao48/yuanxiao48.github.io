@@ -25,6 +25,10 @@ const OPERATION_FAILURE_CODE = "TRANSCODE_RECOVERY_OPERATION_INVALID";
 const LEASE_INVALID_CODE = "TRANSCODE_SOURCE_READER_LEASE_INVALID";
 const LEASE_KIND_CODE = "TRANSCODE_SOURCE_READER_LEASE_KIND_INVALID";
 const LEASE_SOURCE_MISMATCH_CODE = "TRANSCODE_SOURCE_READER_LEASE_SOURCE_MISMATCH";
+const ACQUISITION_PROOF_INVALID_CODE = "TRANSCODE_SOURCE_READER_ACQUISITION_PROOF_INVALID";
+const ACQUISITION_PROOF_USED_CODE = "TRANSCODE_SOURCE_READER_ACQUISITION_PROOF_ALREADY_USED";
+const RELEASE_HANDLE_INVALID_CODE = "TRANSCODE_SOURCE_READER_RELEASE_HANDLE_INVALID";
+const RELEASE_GENERATION_MISMATCH_CODE = "TRANSCODE_SOURCE_READER_RELEASE_GENERATION_MISMATCH";
 const RECOVERY_READER_ACTIVE_CODE = "TRANSCODE_SOURCE_RECOVERY_READER_ACTIVE";
 const CONTRIBUTION_FAILURE_CODE = "TRANSCODE_RECOVERY_READER_CONTRIBUTION_INVALID";
 const TARGET_NOT_EMPTY_CODE = "TRANSCODE_RECOVERY_LOCK_INSTALL_TARGET_NOT_EMPTY";
@@ -34,6 +38,8 @@ const plans = new WeakMap();
 const lockViews = new WeakSet();
 const leaseTokens = new WeakMap();
 const leaseConsumers = new WeakSet();
+const readerAcquisitionProofs = new WeakMap();
+const readerReleaseHandles = new WeakMap();
 const contributionConsumers = new WeakSet();
 const contributions = new WeakMap();
 
@@ -331,13 +337,49 @@ export function createTranscodeSourceReaderLeaseAuthority() {
 	const authority = {};
 	const registryConsumer = freeze({ authority });
 	leaseConsumers.add(registryConsumer);
+	const runtimeAcquisitionConsumer = freeze({
+		inspect(proof, releaseHandle, callback) {
+			const acquisition = readerAcquisitionProofs.get(proof);
+			const release = readerReleaseHandles.get(releaseHandle);
+			if (!acquisition || acquisition.authority !== authority || acquisition.used || !release || release.authority !== authority
+				|| release.released || release.acquisition !== acquisition || typeof callback !== "function") {
+				return freeze({ ok: false, code: !acquisition || acquisition.authority !== authority
+					? ACQUISITION_PROOF_INVALID_CODE
+					: acquisition.used ? ACQUISITION_PROOF_USED_CODE : RELEASE_HANDLE_INVALID_CODE });
+			}
+			try { return callback(freeze({ sourceKey: acquisition.sourceKey })); }
+			catch { return freeze({ ok: false, code: ACQUISITION_PROOF_INVALID_CODE }); }
+		},
+		consume(proof) {
+			const acquisition = readerAcquisitionProofs.get(proof);
+			if (!acquisition || acquisition.authority !== authority) return freeze({ ok: false, code: ACQUISITION_PROOF_INVALID_CODE });
+			if (acquisition.used || !acquisition.active()) return freeze({ ok: false, code: ACQUISITION_PROOF_USED_CODE });
+			acquisition.used = true;
+			return freeze({ ok: true, code: null });
+		},
+	});
+	const runtimeReleaseConsumer = freeze({
+		release(releaseHandle) {
+			const release = readerReleaseHandles.get(releaseHandle);
+			if (!release || release.authority !== authority || typeof release.release !== "function") {
+				return freeze({ ok: false, code: RELEASE_HANDLE_INVALID_CODE, released: false });
+			}
+			if (release.released) return freeze({ ok: true, code: null, released: true, alreadyReleased: true });
+			let result;
+			try { result = release.release(); }
+			catch { return freeze({ ok: false, code: RELEASE_HANDLE_INVALID_CODE, released: false }); }
+			if (!result?.ok || result.released !== true) return freeze({ ok: false, code: result?.code || RELEASE_HANDLE_INVALID_CODE, released: false });
+			release.released = true;
+			return freeze({ ok: true, code: null, released: true, alreadyReleased: false });
+		},
+	});
 	function mint(kind) {
 		const token = {};
 		Object.defineProperties(token, {
 			kind: { value: "transcode-source-reader-lease", enumerable: false },
 			toJSON: { value: () => ({ kind: "transcode-source-reader-lease" }), enumerable: false },
 		});
-		leaseTokens.set(token, { authority, kind, sourceKey: null });
+		leaseTokens.set(token, { authority, kind, sourceKey: null, runtimeRegistry: null, runtimeGeneration: 0, runtimeActiveGeneration: null });
 		return freeze(token);
 	}
 	return freeze({
@@ -346,6 +388,8 @@ export function createTranscodeSourceReaderLeaseAuthority() {
 			mintRecoveryReaderLease() { return freeze({ ok: true, leaseToken: mint("recovery") }); },
 		}),
 		registryConsumer,
+		runtimeAcquisitionConsumer,
+		runtimeReleaseConsumer,
 	});
 }
 
@@ -365,6 +409,7 @@ export function createReasonAwareSourceLockRegistry({
 		throw new TypeError("Recovery source lock registry dependencies are invalid");
 	}
 	const validateLease = (token, kind) => validReaderLease(readerLeaseConsumer, token, kind);
+	const registryIdentity = {};
 	function resolve(sourcePublicPath) {
 		return normalizeSourceKey(normalizeLibrarySourceKey, sourcePublicPath);
 	}
@@ -415,7 +460,43 @@ export function createReasonAwareSourceLockRegistry({
 		const acquired = !owners.has(leaseToken);
 		owners.add(leaseToken);
 		if (!current.entry) targetMap.set(sourceKey, entry);
-		return freeze({ ok: true, code: null, acquired, view: sourceView(entry) });
+		if (kind !== "runtime" || !acquired) return freeze({ ok: true, code: null, acquired, view: sourceView(entry), acquisitionProof: null, releaseHandle: null });
+		const details = leaseTokens.get(leaseToken);
+		if (details.runtimeRegistry !== null && details.runtimeRegistry !== registryIdentity) {
+			owners.delete(leaseToken);
+			if (!current.entry && !hasAnyOwner(entry)) targetMap.delete(sourceKey);
+			return freeze({ ok: false, code: ACQUISITION_PROOF_INVALID_CODE, acquired: false, view: emptyView(false, ACQUISITION_PROOF_INVALID_CODE), acquisitionProof: null, releaseHandle: null });
+		}
+		details.runtimeRegistry = registryIdentity;
+		details.runtimeGeneration += 1;
+		details.runtimeActiveGeneration = details.runtimeGeneration;
+		const generation = details.runtimeGeneration;
+		const acquisition = { authority: readerLeaseConsumer.authority, registryIdentity, sourceKey, leaseToken, generation, used: false,
+			active: () => details.runtimeRegistry === registryIdentity && details.runtimeActiveGeneration === generation };
+		const acquisitionProof = freeze({ kind: "transcode-source-reader-acquisition-proof" });
+		const releaseHandle = freeze({ kind: "transcode-source-reader-release-handle" });
+		readerAcquisitionProofs.set(acquisitionProof, acquisition);
+		readerReleaseHandles.set(releaseHandle, {
+			authority: readerLeaseConsumer.authority,
+			acquisition,
+			released: false,
+			release: () => releaseRuntimeAcquisition(sourceKey, leaseToken, acquisition.generation),
+		});
+		return freeze({ ok: true, code: null, acquired, view: sourceView(entry), acquisitionProof, releaseHandle });
+	}
+	function releaseRuntimeAcquisition(sourceKey, leaseToken, generation) {
+		const details = leaseTokens.get(leaseToken);
+		if (!details || details.runtimeRegistry !== registryIdentity || details.runtimeActiveGeneration !== generation) {
+			return freeze({ ok: false, code: RELEASE_GENERATION_MISMATCH_CODE, released: false });
+		}
+		const current = currentEntry(sourceKey);
+		if (current.code || !current.entry || !current.entry.runtimeReaderLeaseIds.has(leaseToken)) {
+			return freeze({ ok: false, code: current.code || RELEASE_GENERATION_MISMATCH_CODE, released: false });
+		}
+		current.entry.runtimeReaderLeaseIds.delete(leaseToken);
+		details.runtimeActiveGeneration = null;
+		if (!hasAnyOwner(current.entry)) targetMap.delete(sourceKey);
+		return freeze({ ok: true, code: null, released: true });
 	}
 	function releaseReader(sourcePublicPath, leaseToken, kind) {
 		const sourceKey = resolve(sourcePublicPath);
@@ -427,6 +508,10 @@ export function createReasonAwareSourceLockRegistry({
 		if (!current.entry) return freeze({ ok: true, code: null, released: false, view: emptyView() });
 		const owners = kind === "runtime" ? current.entry.runtimeReaderLeaseIds : current.entry.recoveryReaderLeaseIds;
 		const released = owners.delete(leaseToken);
+		if (kind === "runtime" && released) {
+			const details = leaseTokens.get(leaseToken);
+			if (details?.runtimeRegistry === registryIdentity) details.runtimeActiveGeneration = null;
+		}
 		if (!hasAnyOwner(current.entry)) targetMap.delete(sourceKey);
 		return freeze({ ok: true, code: null, released, view: sourceView(current.entry) });
 	}

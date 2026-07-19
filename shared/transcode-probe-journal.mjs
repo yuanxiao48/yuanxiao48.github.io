@@ -328,9 +328,9 @@ function makeProof(authority, entry) {
 	return proof;
 }
 
-function makeHandle(authority, entry) {
+function makeHandle(authority, entry, clear) {
 	const handle = freeze({ kind: "transcode-probe-journal-cleanup" });
-	handles.set(handle, { authority, entry, cleared: false });
+	handles.set(handle, { authority, entry, clear, cleared: false });
 	return handle;
 }
 
@@ -363,6 +363,21 @@ export function createTranscodeProbeJournalAuthority({ normalizeLibrarySourceKey
 	const policy = policyFrom(suppliedPolicy);
 	const authority = {};
 	const proofConsumer = freeze({
+		inspect(proof, cleanupHandle, callback) {
+			const details = proofs.get(proof);
+			const handle = handles.get(cleanupHandle);
+			if (!details || details.authority !== authority || details.used || !handle || handle.authority !== authority
+				|| handle.cleared || !matchingEntry(details.entry, handle.entry) || typeof callback !== "function") {
+				return freeze({ ok: false, code: !details || details.authority !== authority || !handle || handle.authority !== authority
+					? TRANSCODE_PROBE_JOURNAL_CODES.proofInvalid
+					: details.used ? TRANSCODE_PROBE_JOURNAL_CODES.proofAlreadyUsed : TRANSCODE_PROBE_JOURNAL_CODES.handleInvalid });
+			}
+			try {
+				return callback(freeze({ sourceKey: details.entry.sourcePublicPath }));
+			} catch {
+				return freeze({ ok: false, code: TRANSCODE_PROBE_JOURNAL_CODES.proofInvalid });
+			}
+		},
 		consume(proof) {
 			const details = proofs.get(proof);
 			if (!details || details.authority !== authority) return safeResult(false, TRANSCODE_PROBE_JOURNAL_CODES.proofInvalid, { claim: null });
@@ -371,6 +386,16 @@ export function createTranscodeProbeJournalAuthority({ normalizeLibrarySourceKey
 			const claim = freeze({ kind: "transcode-probe-journal-proof-claim" });
 			proofClaims.set(claim, { authority, entry: details.entry });
 			return safeResult(true, null, { claim });
+		},
+	});
+	const cleanupConsumer = freeze({
+		async clear(cleanupHandle) {
+			const details = handles.get(cleanupHandle);
+			if (!details || details.authority !== authority || typeof details.clear !== "function") {
+				return stableRuntimeFailure(TRANSCODE_PROBE_JOURNAL_CODES.handleInvalid);
+			}
+			try { return await details.clear(cleanupHandle); }
+			catch { return stableRuntimeFailure(TRANSCODE_PROBE_JOURNAL_CODES.clearFailed); }
 		},
 	});
 	const finalCollectionConsumer = freeze({
@@ -412,7 +437,7 @@ export function createTranscodeProbeJournalAuthority({ normalizeLibrarySourceKey
 				: exactKeys(outcome, ["status"]) && outcome.status === "conflict" ? TRANSCODE_PROBE_JOURNAL_CODES.casConflict
 				: TRANSCODE_PROBE_JOURNAL_CODES.casFailed;
 		}
-		return freeze({
+		const transaction = freeze({
 			async addProtectedEntry({ sourcePublicPath, bootWitness, entryId, entryGeneration } = {}) {
 				const current = await readCurrent();
 				if (!current.ok) return current;
@@ -431,7 +456,7 @@ export function createTranscodeProbeJournalAuthority({ normalizeLibrarySourceKey
 				catch (error) { return stableRuntimeFailure(error?.code || TRANSCODE_PROBE_JOURNAL_CODES.invalid); }
 				const code = await cas(current.raw.identity, nextBytes);
 				if (code) return stableRuntimeFailure(code);
-				return freeze({ ok: true, code: null, proof: makeProof(authority, entry), cleanupHandle: makeHandle(authority, entry), cleared: false });
+				return freeze({ ok: true, code: null, proof: makeProof(authority, entry), cleanupHandle: makeHandle(authority, entry, transaction.clearProtectedEntry), cleared: false });
 			},
 			async clearProtectedEntry(cleanupHandle) {
 				const details = handles.get(cleanupHandle);
@@ -450,6 +475,7 @@ export function createTranscodeProbeJournalAuthority({ normalizeLibrarySourceKey
 				return freeze({ ok: true, code: null, proof: null, cleanupHandle: null, cleared: true, alreadyCleared: false });
 			},
 		});
+		return transaction;
 	}
 
 	function createStartupResolver({ readJournalRaw, compareAndSwapJournalRaw } = {}) {
@@ -548,6 +574,7 @@ export function createTranscodeProbeJournalAuthority({ normalizeLibrarySourceKey
 	return freeze({
 		transactionIssuer: freeze({ createRuntimeTransaction }),
 		proofConsumer,
+		cleanupConsumer,
 		finalCollectionConsumer,
 		createStartupResolver,
 		createRecoveryContributionAdapter,
