@@ -28,6 +28,8 @@ let planResult = createRecoveryLockPlan({ snapshots: [snapshot(ids[0], "ready")]
 assert.equal(planResult.ok, true);
 assert.equal(planResult.summary.activeOwnerCount, 1);
 assert.equal(planResult.summary.recoveryOwnerCount, 0);
+assert.equal(planResult.summary.runtimeReaderOwnerCount, 0);
+assert.equal(planResult.summary.recoveryReaderOwnerCount, 0);
 assert.equal(isOpaqueRecoveryLockPlan(planResult.plan), true);
 assert.equal(JSON.stringify(planResult.plan).includes("Track"), false);
 assert.equal(JSON.stringify(planResult.plan).includes(ids[0]), false);

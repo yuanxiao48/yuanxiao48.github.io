@@ -38,8 +38,12 @@ assert.deepEqual(view, {
 	code: null,
 	hasActive: true,
 	hasRecovery: true,
+	hasRuntimeReader: false,
+	hasRecoveryReader: false,
 	activeOwnerCount: 2,
 	recoveryOwnerCount: 2,
+	runtimeReaderOwnerCount: 0,
+	recoveryReaderOwnerCount: 0,
 });
 assert.equal(Object.isFrozen(view), true);
 assert.equal("activeJobIds" in view, false);

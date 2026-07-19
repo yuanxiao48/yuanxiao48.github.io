@@ -22,13 +22,20 @@ let installed = installRecoveryLockPlan({ targetMap: target, plan: plan.plan });
 assert.equal(installed.ok, true);
 assert.equal(target, sameReference);
 assert.equal(target.size, 2);
+assert.equal(target.get("/media/a.m4a").version, 2);
 assert.equal(target.get("/media/a.m4a").activeJobIds.has(JOB_A), true);
 assert.equal(target.get("/media/b.m4a").recoveryJobIds.has(JOB_B), true);
+assert.equal(target.get("/media/a.m4a").runtimeReaderLeaseIds.size, 0);
+assert.equal(target.get("/media/b.m4a").recoveryReaderLeaseIds.size, 0);
 
 const legacy = new Map([["/media/old.m4a", JOB_A]]);
 installed = installRecoveryLockPlan({ targetMap: legacy, plan: plan.plan });
 assert.equal(installed.ok, false);
 assert.equal(legacy.get("/media/old.m4a"), JOB_A);
+
+installed = installRecoveryLockPlan({ targetMap: target, plan: plan.plan });
+assert.equal(installed.ok, false);
+assert.equal(installed.code, "TRANSCODE_RECOVERY_LOCK_INSTALL_TARGET_NOT_EMPTY");
 
 class OneFailureMap extends Map {
 	constructor(entries) {
@@ -46,17 +53,28 @@ class OneFailureMap extends Map {
 	}
 }
 
-const oldEntry = { activeJobIds: new Set([JOB_A]), recoveryJobIds: new Set() };
-const failing = new OneFailureMap([["/media/old.m4a", oldEntry]]);
+const failing = new OneFailureMap();
 failing.setCalls = 0;
-failing.failAt = 2;
+failing.failAt = 1;
 installed = installRecoveryLockPlan({ targetMap: failing, plan: plan.plan });
 assert.equal(installed.ok, false);
 assert.equal(installed.registryStateUnknown, false);
-assert.equal(failing.size, 1);
-assert.equal(failing.get("/media/old.m4a").activeJobIds.has(JOB_A), true);
+assert.equal(failing.size, 0);
 
 installed = installRecoveryLockPlan({ targetMap: target, plan: { kind: "transcode-recovery-lock-plan" } });
 assert.equal(installed.ok, false);
 assert.equal(installed.installed, false);
+
+class RollbackFailureMap extends Map {
+	clear() {
+		this.clearCalls = (this.clearCalls || 0) + 1;
+		if (this.clearCalls === 2) throw new Error("rollback failure");
+		return super.clear();
+	}
+	set() { throw new Error("set failure"); }
+}
+
+installed = installRecoveryLockPlan({ targetMap: new RollbackFailureMap(), plan: plan.plan });
+assert.equal(installed.ok, false);
+assert.equal(installed.registryStateUnknown, true);
 console.log("transcode recovery lock installation tests passed");
