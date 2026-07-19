@@ -3,6 +3,11 @@
  * This module never reads, writes, removes, or discovers files by itself.
  */
 import path from "node:path";
+import {
+	isHostBootSessionWitness,
+	normalizeHostBootSessionWitness,
+	serializeHostBootSessionWitness,
+} from "./host-boot-session-witness.mjs";
 
 export const TRANSCODE_RECOVERY_OUTPUT_FILENAMES = Object.freeze([
 	"output.partial.m4a",
@@ -21,6 +26,10 @@ export const TRANSCODE_RECOVERY_HOLD_CODE = "TRANSCODE_RECOVERY_OUTPUT_UNCONFIRM
 export const TRANSCODE_PREEXECUTION_RECOVERY_CODES = Object.freeze([
 	"TRANSCODE_RECOVERY_INCOMPLETE_UPLOAD",
 	"TRANSCODE_RECOVERY_SOURCE_ACCESS_UNCONFIRMED",
+]);
+export const TRANSCODE_SOURCE_ACCESS_EVIDENCE_ORIGINS = Object.freeze([
+	"legacy-observed",
+	"managed-job-probe",
 ]);
 export const TRANSCODE_RECOVERY_WARNING_CODES = Object.freeze([
 	"TRANSCODE_RECOVERY_OUTPUT_UNSAFE",
@@ -198,20 +207,92 @@ export function updateRecoveryHold(hold, { lastCheckedAt, retryAfter } = {}) {
 	});
 }
 
-export function createPreExecutionRecovery({ code, detectedAt } = {}) {
+function safeProbeGeneration(value) {
+	return Number.isSafeInteger(value) && value >= 0;
+}
+
+function normalizedWitness(value) {
+	return isHostBootSessionWitness(value) ? value : normalizeHostBootSessionWitness(value).witness || null;
+}
+
+export function createPreExecutionRecovery({ code, detectedAt, sourceAccessWitness = null, evidenceOrigin = null } = {}) {
 	if (!TRANSCODE_PREEXECUTION_RECOVERY_CODES.includes(code) || !isSafeIsoTime(detectedAt)) {
 		throw new Error("Pre-execution recovery is invalid");
 	}
-	return freeze({ version: 1, active: true, code, detectedAt });
+	if (code !== "TRANSCODE_RECOVERY_SOURCE_ACCESS_UNCONFIRMED") {
+		if (sourceAccessWitness !== null || evidenceOrigin !== null) throw new Error("Pre-execution recovery witness is invalid");
+		return freeze({ version: 1, active: true, code, detectedAt });
+	}
+	if (sourceAccessWitness === null && evidenceOrigin === null) return freeze({ version: 1, active: true, code, detectedAt });
+	const witness = normalizedWitness(sourceAccessWitness);
+	if (!witness || !TRANSCODE_SOURCE_ACCESS_EVIDENCE_ORIGINS.includes(evidenceOrigin)) {
+		throw new Error("Pre-execution recovery witness is invalid");
+	}
+	return freeze({
+		version: 2,
+		active: true,
+		code,
+		detectedAt,
+		sourceAccessWitness: serializeHostBootSessionWitness(witness),
+		evidenceOrigin,
+	});
 }
 
 export function normalizePreExecutionRecovery(value) {
 	if (value === null || value === undefined || value.active === false) return freeze({ recovery: null, malformed: false });
 	if (isRecord(value) && value.version === 1 && value.active === true
 		&& TRANSCODE_PREEXECUTION_RECOVERY_CODES.includes(value.code) && isSafeIsoTime(value.detectedAt)) {
-		return freeze({ recovery: freeze({ version: 1, active: true, code: value.code, detectedAt: value.detectedAt }), malformed: false });
+		if (value.sourceAccessWitness !== undefined || value.evidenceOrigin !== undefined) return freeze({ recovery: null, malformed: true });
+		return freeze({ recovery: freeze({ version: 1, active: true, code: value.code, detectedAt: value.detectedAt, sourceAccessWitness: null, evidenceOrigin: null }), malformed: false });
+	}
+	if (isRecord(value) && value.version === 2 && value.active === true
+		&& value.code === "TRANSCODE_RECOVERY_SOURCE_ACCESS_UNCONFIRMED" && isSafeIsoTime(value.detectedAt)
+		&& TRANSCODE_SOURCE_ACCESS_EVIDENCE_ORIGINS.includes(value.evidenceOrigin)) {
+		const witness = normalizedWitness(value.sourceAccessWitness);
+		if (witness) {
+			return freeze({
+				recovery: freeze({ version: 2, active: true, code: value.code, detectedAt: value.detectedAt, sourceAccessWitness: witness, evidenceOrigin: value.evidenceOrigin }),
+				malformed: false,
+			});
+		}
 	}
 	return freeze({ recovery: null, malformed: true });
+}
+
+export function createSourceProbeEvidence({ generation, bootWitness } = {}) {
+	const witness = normalizedWitness(bootWitness);
+	if (!safeProbeGeneration(generation) || !witness) throw new Error("Source probe evidence is invalid");
+	return freeze({
+		version: 1,
+		active: true,
+		generation,
+		bootWitness: serializeHostBootSessionWitness(witness),
+	});
+}
+
+export function normalizeSourceProbeEvidence(value) {
+	if (value === null || value === undefined || value.active === false) return freeze({ evidence: null, malformed: false });
+	if (!isRecord(value) || value.version !== 1 || value.active !== true || !safeProbeGeneration(value.generation)) {
+		return freeze({ evidence: null, malformed: true });
+	}
+	const witness = normalizedWitness(value.bootWitness);
+	if (!witness) return freeze({ evidence: null, malformed: true });
+	return freeze({ evidence: freeze({ version: 1, active: true, generation: value.generation, bootWitness: witness }), malformed: false });
+}
+
+/**
+ * Future managed probes may clear evidence only from the original close path
+ * and only when its generation still matches the persisted evidence.
+ */
+export function evaluateSourceProbeEvidenceClear({ evidence, generation, closeConfirmed = false } = {}) {
+	const normalized = normalizeSourceProbeEvidence(evidence);
+	if (!normalized.evidence) return freeze({ permitted: false, code: "SOURCE_PROBE_EVIDENCE_INVALID" });
+	if (!safeProbeGeneration(generation) || generation !== normalized.evidence.generation) {
+		return freeze({ permitted: false, code: "SOURCE_ACCESS_EVIDENCE_STALE" });
+	}
+	return closeConfirmed === true
+		? freeze({ permitted: true, code: null })
+		: freeze({ permitted: false, code: "SOURCE_PROBE_EVIDENCE_PERSIST_REQUIRED" });
 }
 
 export function normalizeRecoveryWarning(value) {

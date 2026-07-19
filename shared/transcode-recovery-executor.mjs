@@ -20,6 +20,7 @@ import {
 	validateRecoveryCleanupCandidate,
 } from "./transcode-recovery.mjs";
 import { isManifestContentIdentity, sameManifestContentIdentity } from "./transcode-manifest-identity.mjs";
+import { isHostBootSessionWitness } from "./host-boot-session-witness.mjs";
 
 const SAFE_JOB_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RECOVERY_INTERRUPTED_ERROR = Object.freeze({
@@ -289,9 +290,9 @@ function isHeldInterrupted(job) {
 	return job?.state === "interrupted" && Boolean(normalizeRecoveryHold(job.recoveryHold).hold);
 }
 
-export function createStartupRecoveryContext({ startupIdentity, startupWallTimeMs, startupMonotonicTimeMs = 0, preexistingHoldJobIds = [] } = {}) {
+export function createStartupRecoveryContext({ startupIdentity, startupWallTimeMs, startupMonotonicTimeMs = 0, preexistingHoldJobIds = [], sourceAccessWitness = null } = {}) {
 	if (typeof startupIdentity !== "string" || !startupIdentity || !Number.isFinite(startupWallTimeMs) || startupWallTimeMs < 0
-		|| !Number.isFinite(startupMonotonicTimeMs) || startupMonotonicTimeMs < 0) {
+		|| !Number.isFinite(startupMonotonicTimeMs) || startupMonotonicTimeMs < 0 || (sourceAccessWitness !== null && !isHostBootSessionWitness(sourceAccessWitness))) {
 		throw new Error("Startup recovery context is invalid");
 	}
 	const preexisting = new Set([...preexistingHoldJobIds].filter(isSafeJobId));
@@ -300,6 +301,7 @@ export function createStartupRecoveryContext({ startupIdentity, startupWallTimeM
 		startupWallTimeMs,
 		startupMonotonicTimeMs,
 		hasPreexistingHold: (jobId) => preexisting.has(jobId),
+		getSourceAccessWitness: () => sourceAccessWitness,
 	});
 }
 

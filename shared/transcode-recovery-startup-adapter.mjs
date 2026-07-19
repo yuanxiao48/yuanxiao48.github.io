@@ -15,6 +15,7 @@ import {
 	isManifestContentIdentity,
 	sameManifestContentIdentity,
 } from "./transcode-manifest-identity.mjs";
+import { isHostBootSessionWitness } from "./host-boot-session-witness.mjs";
 
 const SAFE_JOB_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RECOVERY_CODES = Object.freeze({
@@ -318,6 +319,21 @@ function safeBatchSummary(batch) {
 	});
 }
 
+function safePreFinalSummary(phase) {
+	const count = (name) => Number.isSafeInteger(phase?.[name]) && phase[name] >= 0 ? phase[name] : 0;
+	return freeze({
+		mustBlockListen: phase?.mustBlockListen === true,
+		criticalCount: count("criticalCount"),
+		sourceAccessLegacyCount: count("sourceAccessLegacyCount"),
+		sourceAccessWitnessRecordedCount: count("sourceAccessWitnessRecordedCount"),
+		sourceAccessSameSessionCount: count("sourceAccessSameSessionCount"),
+		sourceAccessClearedCount: count("sourceAccessClearedCount"),
+		sourceAccessRetainedCount: count("sourceAccessRetainedCount"),
+		sourceAccessCriticalCount: count("sourceAccessCriticalCount"),
+		sourceProbeEvidenceCount: count("sourceProbeEvidenceCount"),
+	});
+}
+
 /**
  * Memoized two-pass coordinator. It reports recovery readiness only; it never
  * listens, installs locks, changes process state, or decides canListen.
@@ -332,7 +348,7 @@ export function createTranscodeStartupRecoveryOrchestrator(dependencies = {}) {
 	let runPromise = null;
 	let finalSnapshotCollection = null;
 
-	function summary({ status, totalJobs, recoveryCompleted, requiresLockPlanning, mustBlockListen, criticalCount, batchResult, finalSnapshotReady = false } = {}) {
+	function summary({ status, totalJobs, recoveryCompleted, requiresLockPlanning, mustBlockListen, criticalCount, batchResult, preFinalResult = null, finalSnapshotReady = false } = {}) {
 		return freeze({
 			status,
 			totalJobs,
@@ -341,6 +357,7 @@ export function createTranscodeStartupRecoveryOrchestrator(dependencies = {}) {
 			mustBlockListen,
 			criticalCount,
 			batchResult,
+			preFinalResult,
 			finalSnapshotReady,
 		});
 	}
@@ -389,6 +406,15 @@ export function createTranscodeStartupRecoveryOrchestrator(dependencies = {}) {
 					|| preExecution.recovery || (preExecution.malformed && record?.job?.preExecutionRecovery !== null && record?.job?.preExecutionRecovery !== undefined));
 			})())
 			.map((record) => record.job.id);
+		let sourceAccessWitness = null;
+		if (typeof dependencies.runPreFinalRecoveryPhases === "function" && typeof dependencies.getStartupSourceAccessWitness === "function") {
+			try {
+				sourceAccessWitness = await dependencies.getStartupSourceAccessWitness();
+				if (sourceAccessWitness !== null && !isHostBootSessionWitness(sourceAccessWitness)) throw new Error(RECOVERY_CODES.invalid);
+			} catch {
+				return summary({ status: "blockedBeforeRecovery", totalJobs: jobIds.length, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
+			}
+		}
 		let context;
 		try {
 			context = createStartupRecoveryContext({
@@ -396,6 +422,7 @@ export function createTranscodeStartupRecoveryOrchestrator(dependencies = {}) {
 				startupWallTimeMs: dependencies.wallNowMs(),
 				startupMonotonicTimeMs: dependencies.monotonicNowMs(),
 				preexistingHoldJobIds,
+				sourceAccessWitness,
 			});
 		} catch {
 			return summary({ status: "blockedBeforeRecovery", totalJobs: jobIds.length, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
@@ -410,12 +437,23 @@ export function createTranscodeStartupRecoveryOrchestrator(dependencies = {}) {
 		if (batchResult.mustBlockListen) {
 			return summary({ status: "blockedAfterRecovery", totalJobs: jobIds.length, recoveryCompleted: true, requiresLockPlanning: false, mustBlockListen: true, criticalCount: batchResult.critical, batchResult });
 		}
+		let preFinalResult = null;
+		if (typeof dependencies.runPreFinalRecoveryPhases === "function") {
+			try {
+				preFinalResult = safePreFinalSummary(await dependencies.runPreFinalRecoveryPhases({ jobIds: freeze([...jobIds]), context }));
+			} catch {
+				preFinalResult = safePreFinalSummary({ mustBlockListen: true, criticalCount: 1, sourceAccessCriticalCount: 1 });
+			}
+			if (preFinalResult.mustBlockListen) {
+				return summary({ status: "blockedAfterRecovery", totalJobs: jobIds.length, recoveryCompleted: true, requiresLockPlanning: false, mustBlockListen: true, criticalCount: Math.max(1, batchResult.critical + preFinalResult.criticalCount), batchResult, preFinalResult });
+			}
+		}
 		try {
 			finalSnapshotCollection = createFinalSnapshotCollection(await readFinalSnapshots(jobIds));
 		} catch {
-			return summary({ status: "blockedAfterRecovery", totalJobs: jobIds.length, recoveryCompleted: true, requiresLockPlanning: false, mustBlockListen: true, criticalCount: Math.max(1, batchResult.critical), batchResult });
+			return summary({ status: "blockedAfterRecovery", totalJobs: jobIds.length, recoveryCompleted: true, requiresLockPlanning: false, mustBlockListen: true, criticalCount: Math.max(1, batchResult.critical), batchResult, preFinalResult });
 		}
-		if (jobIds.length === 0) return summary({ status: "noJobs", totalJobs: 0, recoveryCompleted: true, requiresLockPlanning: false, mustBlockListen: false, criticalCount: 0, batchResult, finalSnapshotReady: true });
+		if (jobIds.length === 0) return summary({ status: "noJobs", totalJobs: 0, recoveryCompleted: true, requiresLockPlanning: false, mustBlockListen: false, criticalCount: 0, batchResult, preFinalResult, finalSnapshotReady: true });
 		const held = batchResult.initialHolds + batchResult.retainedHolds + batchResult.partial + batchResult.preExecution;
 		const terminalOnly = batchResult.protected === jobIds.length;
 		return summary({
@@ -426,6 +464,7 @@ export function createTranscodeStartupRecoveryOrchestrator(dependencies = {}) {
 			mustBlockListen: false,
 			criticalCount: 0,
 			batchResult,
+			preFinalResult,
 			finalSnapshotReady: true,
 		});
 	}
