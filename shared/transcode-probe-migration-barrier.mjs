@@ -9,6 +9,12 @@ import {
 	normalizeHostBootSessionWitness,
 	serializeHostBootSessionWitness,
 } from "./host-boot-session-witness.mjs";
+import {
+	compareHostExecutionContainment,
+	getHostExecutionContainmentCurrentWitness,
+	isHostExecutionContainmentStartupState,
+	HOST_EXECUTION_CONTAINMENT_RESULTS,
+} from "./host-execution-containment-comparison.mjs";
 
 const DEFAULT_POLICY = Object.freeze({ maxRawBytes: 8 * 1024 });
 const identities = new WeakMap();
@@ -20,6 +26,16 @@ const BLOCKED_OPERATIONS = new Set([
 	"trash", "restore-target", "delete", "permanent-delete", "rename-source", "rename-target",
 	"move-source", "move-target", "replace-source", "replace-target", "overwrite", "from-library", "direct-library-probe",
 ]);
+
+function containmentComparison(state, persisted, currentWitness) {
+	if (state !== null && state !== undefined) return compareHostExecutionContainment(state, persisted);
+	if (!isHostBootSessionWitness(currentWitness)) return Object.freeze({ classification: HOST_EXECUTION_CONTAINMENT_RESULTS.unavailable, code: "HOST_EXECUTION_CONTAINMENT_UNAVAILABLE" });
+	const relation = compareHostBootSessionWitness(persisted, currentWitness);
+	if (relation.relation === "same-session") return Object.freeze({ classification: HOST_EXECUTION_CONTAINMENT_RESULTS.retained, code: null });
+	if (relation.relation === "different-session") return Object.freeze({ classification: HOST_EXECUTION_CONTAINMENT_RESULTS.terminated, code: null });
+	if (relation.relation === "incomparable") return Object.freeze({ classification: HOST_EXECUTION_CONTAINMENT_RESULTS.incomparable, code: relation.code });
+	return Object.freeze({ classification: relation.relation === "malformed" ? HOST_EXECUTION_CONTAINMENT_RESULTS.malformed : HOST_EXECUTION_CONTAINMENT_RESULTS.unavailable, code: relation.code });
+}
 
 export const TRANSCODE_PROBE_MIGRATION_CODES = Object.freeze({
 	invalid: "TRANSCODE_PROBE_MIGRATION_MARKER_INVALID",
@@ -285,8 +301,11 @@ export function createTranscodeProbeMigrationBarrierAuthority({ policy: supplied
 				: TRANSCODE_PROBE_MIGRATION_CODES.casFailed;
 		}
 		return freeze({
-			async resolve({ currentBootWitness = null } = {}) {
-				const current = currentBootWitness === null ? null : normalizeWitness(currentBootWitness);
+			async resolve({ currentBootWitness = null, executionContainmentStartupState = null } = {}) {
+				if (executionContainmentStartupState !== null && !isHostExecutionContainmentStartupState(executionContainmentStartupState)) return failure(TRANSCODE_PROBE_MIGRATION_CODES.witnessInvalid);
+				const current = executionContainmentStartupState === null
+					? currentBootWitness === null ? null : normalizeWitness(currentBootWitness)
+					: getHostExecutionContainmentCurrentWitness(executionContainmentStartupState);
 				if (currentBootWitness !== null && !current) return failure(TRANSCODE_PROBE_MIGRATION_CODES.witnessInvalid);
 				const initial = await read(false);
 				if (!initial.ok) return initial;
@@ -306,9 +325,10 @@ export function createTranscodeProbeMigrationBarrierAuthority({ policy: supplied
 					if (!baseline) return failure(TRANSCODE_PROBE_MIGRATION_CODES.witnessInvalid);
 					if (current === null) comparison = "unavailable";
 					else {
-						const relation = compareHostBootSessionWitness(baseline, current).relation;
-						comparison = relation;
-						if (relation === "different-session") {
+						const containment = containmentComparison(executionContainmentStartupState, baseline, current);
+						comparison = containment.classification;
+						if (containment.classification === HOST_EXECUTION_CONTAINMENT_RESULTS.malformed) return failure(TRANSCODE_PROBE_MIGRATION_CODES.witnessInvalid);
+						if (containment.classification === HOST_EXECUTION_CONTAINMENT_RESULTS.terminated) {
 							let bytes;
 							try { bytes = serializeMarker({ state: "complete", baselineWitness: null }, policy); }
 							catch (error) { return failure(error?.code || TRANSCODE_PROBE_MIGRATION_CODES.invalid); }
@@ -354,4 +374,3 @@ export function createTranscodeProbeMigrationBarrierAuthority({ policy: supplied
 		getPolicy() { return freeze({ ...policy }); },
 	});
 }
-

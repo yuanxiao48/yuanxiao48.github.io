@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
 	compareHostBootSessionWitness,
+	sameHostBootSessionWitnessIdentity,
 	normalizeHostBootSessionWitness,
 	serializeHostBootSessionWitness,
 } from "../shared/host-boot-session-witness.mjs";
@@ -19,6 +20,13 @@ assert.equal(compareHostBootSessionWitness(normalized.witness, normalizeHostBoot
 assert.equal(compareHostBootSessionWitness(normalized.witness, normalizeHostBootSessionWitness({ schemaVersion: 1, providerId: "windows-boot-id", providerVersion: 1, bootSessionDigest: digestB }).witness).relation, "different-session");
 assert.equal(compareHostBootSessionWitness(normalized.witness, normalizeHostBootSessionWitness({ schemaVersion: 1, providerId: "other-provider", providerVersion: 1, bootSessionDigest: digestB }).witness).relation, "incomparable");
 assert.equal(compareHostBootSessionWitness(normalized.witness, normalizeHostBootSessionWitness({ schemaVersion: 1, providerId: "windows-boot-id", providerVersion: 2, bootSessionDigest: digestB }).witness).relation, "incomparable");
+const livenessA = normalizeHostBootSessionWitness({ schemaVersion: 1, providerId: "windows-logon-session-liveness", providerVersion: 1, bootSessionDigest: digestA }).witness;
+const livenessB = normalizeHostBootSessionWitness({ schemaVersion: 1, providerId: "windows-logon-session-liveness", providerVersion: 1, bootSessionDigest: digestB }).witness;
+assert.equal(compareHostBootSessionWitness(livenessA, livenessA).relation, "provider-specific-comparison-required");
+assert.equal(compareHostBootSessionWitness(livenessA, livenessB).relation, "provider-specific-comparison-required");
+assert.equal(compareHostBootSessionWitness(livenessA, normalized.witness).relation, "provider-specific-comparison-required");
+assert.equal(sameHostBootSessionWitnessIdentity(livenessA, livenessA).equal, true);
+assert.equal(sameHostBootSessionWitnessIdentity(livenessA, livenessB).equal, false);
 
 for (const invalid of [
 	{ ...raw, bootSessionDigest: digestA.toUpperCase() },

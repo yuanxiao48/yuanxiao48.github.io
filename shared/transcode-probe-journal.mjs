@@ -10,6 +10,12 @@ import {
 	normalizeHostBootSessionWitness,
 	serializeHostBootSessionWitness,
 } from "./host-boot-session-witness.mjs";
+import {
+	compareHostExecutionContainment,
+	getHostExecutionContainmentCurrentWitness,
+	isHostExecutionContainmentStartupState,
+	HOST_EXECUTION_CONTAINMENT_RESULTS,
+} from "./host-execution-containment-comparison.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HEX = /^[a-f0-9]{64}$/;
@@ -20,6 +26,16 @@ const proofClaims = new WeakMap();
 const handles = new WeakMap();
 const finalCollections = new WeakMap();
 const collectionConsumers = new WeakSet();
+
+function containmentComparison(state, persisted, currentWitness) {
+	if (state !== null && state !== undefined) return compareHostExecutionContainment(state, persisted);
+	if (!isHostBootSessionWitness(currentWitness)) return Object.freeze({ classification: HOST_EXECUTION_CONTAINMENT_RESULTS.unavailable, code: "HOST_EXECUTION_CONTAINMENT_UNAVAILABLE" });
+	const relation = compareHostBootSessionWitness(persisted, currentWitness);
+	if (relation.relation === "same-session") return Object.freeze({ classification: HOST_EXECUTION_CONTAINMENT_RESULTS.retained, code: null });
+	if (relation.relation === "different-session") return Object.freeze({ classification: HOST_EXECUTION_CONTAINMENT_RESULTS.terminated, code: null });
+	if (relation.relation === "incomparable") return Object.freeze({ classification: HOST_EXECUTION_CONTAINMENT_RESULTS.incomparable, code: relation.code });
+	return Object.freeze({ classification: relation.relation === "malformed" ? HOST_EXECUTION_CONTAINMENT_RESULTS.malformed : HOST_EXECUTION_CONTAINMENT_RESULTS.unavailable, code: relation.code });
+}
 
 export const TRANSCODE_PROBE_JOURNAL_CODES = Object.freeze({
 	invalid: "TRANSCODE_PROBE_JOURNAL_INVALID",
@@ -498,18 +514,27 @@ export function createTranscodeProbeJournalAuthority({ normalizeLibrarySourceKey
 				: TRANSCODE_PROBE_JOURNAL_CODES.casFailed;
 		}
 		return freeze({
-			async resolve({ currentBootWitness = null } = {}) {
-				const currentWitness = currentBootWitness === null ? null : normalizeWitness(currentBootWitness);
+			async resolve({ currentBootWitness = null, executionContainmentStartupState = null } = {}) {
+				if (executionContainmentStartupState !== null && !isHostExecutionContainmentStartupState(executionContainmentStartupState)) {
+					return freeze({ ok: false, code: TRANSCODE_PROBE_JOURNAL_CODES.witnessInvalid, collection: null, summary: safeSummary({ critical: true }) });
+				}
+				const currentWitness = executionContainmentStartupState === null
+					? currentBootWitness === null ? null : normalizeWitness(currentBootWitness)
+					: getHostExecutionContainmentCurrentWitness(executionContainmentStartupState);
 				if (currentBootWitness !== null && !currentWitness) {
 					return freeze({ ok: false, code: TRANSCODE_PROBE_JOURNAL_CODES.witnessInvalid, collection: null, summary: safeSummary({ critical: true }) });
 				}
 				const initial = await readForResolver(false);
 				if (!initial.ok) return freeze({ ok: false, code: initial.code, collection: null, summary: safeSummary({ critical: true }) });
 				const initialIds = new Set(initial.document.entries.map((entry) => entry.entryId));
+				let comparisonMalformed = false;
 				const remove = currentWitness === null ? [] : initial.document.entries.filter((entry) => {
 					const persisted = normalizeHostBootSessionWitness(entry.bootWitness).witness;
-					return compareHostBootSessionWitness(persisted, currentWitness).relation === "different-session";
+					const compared = containmentComparison(executionContainmentStartupState, persisted, currentWitness);
+					if (compared.classification === HOST_EXECUTION_CONTAINMENT_RESULTS.malformed) comparisonMalformed = true;
+					return compared.classification === HOST_EXECUTION_CONTAINMENT_RESULTS.terminated;
 				});
+				if (comparisonMalformed) return freeze({ ok: false, code: TRANSCODE_PROBE_JOURNAL_CODES.witnessInvalid, collection: null, summary: safeSummary({ initialEntryCount: initial.document.entries.length, critical: true }) });
 				let rewritten = false;
 				if (remove.length) {
 					let nextBytes;

@@ -7,10 +7,14 @@ const PROVIDER_ID = /^[a-z][a-z0-9-]{0,63}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
 const witnesses = new WeakMap();
 
+export const WINDOWS_LOGON_SESSION_LIVENESS_PROVIDER_ID = "windows-logon-session-liveness";
+export const WINDOWS_LOGON_SESSION_LIVENESS_PROVIDER_VERSION = 1;
+
 export const HOST_BOOT_SESSION_WITNESS_CODES = Object.freeze({
 	invalid: "BOOT_SESSION_WITNESS_INVALID",
 	unsupported: "BOOT_SESSION_WITNESS_UNSUPPORTED",
 	incomparable: "BOOT_SESSION_WITNESS_INCOMPARABLE",
+	providerSpecificComparisonRequired: "HOST_BOOT_SESSION_PROVIDER_SPECIFIC_COMPARISON_REQUIRED",
 });
 
 function freeze(value) {
@@ -71,11 +75,33 @@ export function serializeHostBootSessionWitness(witness) {
 	return details ? freeze({ ...details }) : null;
 }
 
+/**
+ * Compares persisted witness identity only. It intentionally says nothing
+ * about whether the containment represented by either witness has ended.
+ */
+export function sameHostBootSessionWitnessIdentity(leftValue, rightValue) {
+	const left = witnesses.get(leftValue);
+	const right = witnesses.get(rightValue);
+	if (!left || !right) return freeze({ ok: false, equal: false, code: HOST_BOOT_SESSION_WITNESS_CODES.invalid });
+	return freeze({
+		ok: true,
+		equal: left.schemaVersion === right.schemaVersion
+			&& left.providerId === right.providerId
+			&& left.providerVersion === right.providerVersion
+			&& left.bootSessionDigest === right.bootSessionDigest,
+		code: null,
+	});
+}
+
 export function compareHostBootSessionWitness(previous, current) {
 	const left = witnesses.get(previous);
 	const right = witnesses.get(current);
 	if (!left || !right) return freeze({ relation: "malformed", code: HOST_BOOT_SESSION_WITNESS_CODES.invalid });
 	if (left.schemaVersion !== right.schemaVersion) return freeze({ relation: "unsupported", code: HOST_BOOT_SESSION_WITNESS_CODES.unsupported });
+	if (left.providerId === WINDOWS_LOGON_SESSION_LIVENESS_PROVIDER_ID
+		|| right.providerId === WINDOWS_LOGON_SESSION_LIVENESS_PROVIDER_ID) {
+		return freeze({ relation: "provider-specific-comparison-required", code: HOST_BOOT_SESSION_WITNESS_CODES.providerSpecificComparisonRequired });
+	}
 	if (left.providerId !== right.providerId || left.providerVersion !== right.providerVersion) {
 		return freeze({ relation: "incomparable", code: HOST_BOOT_SESSION_WITNESS_CODES.incomparable });
 	}

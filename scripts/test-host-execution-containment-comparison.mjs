@@ -1,0 +1,23 @@
+import assert from "node:assert/strict";
+import { createHostExecutionContainmentComparisonAuthority, compareHostExecutionContainment, getHostExecutionContainmentCurrentWitness, HOST_EXECUTION_CONTAINMENT_RESULTS } from "../shared/host-execution-containment-comparison.mjs";
+
+const one = { schemaVersion: 1, providerId: "fake-boot", providerVersion: 1, bootSessionDigest: "1".repeat(64) };
+const two = { ...one, bootSessionDigest: "2".repeat(64) };
+const authorityA = createHostExecutionContainmentComparisonAuthority();
+const authorityB = createHostExecutionContainmentComparisonAuthority();
+const generic = authorityA.genericStartupStateIssuer.createStartupState({ currentWitness: one });
+assert.equal(generic.ok, true);
+assert.equal(Object.isFrozen(generic.startupState), true);
+assert.equal(JSON.stringify(generic.startupState).includes(one.bootSessionDigest), false);
+assert.equal(compareHostExecutionContainment(generic.startupState, one).classification, HOST_EXECUTION_CONTAINMENT_RESULTS.retained);
+assert.equal(compareHostExecutionContainment(generic.startupState, two).classification, HOST_EXECUTION_CONTAINMENT_RESULTS.terminated);
+assert.equal(compareHostExecutionContainment(generic.startupState, { ...one, providerId: "other" }).classification, HOST_EXECUTION_CONTAINMENT_RESULTS.incomparable);
+assert.equal(compareHostExecutionContainment(generic.startupState, {}).classification, HOST_EXECUTION_CONTAINMENT_RESULTS.malformed);
+assert.equal(compareHostExecutionContainment(null, one).classification, HOST_EXECUTION_CONTAINMENT_RESULTS.unavailable);
+assert.equal(authorityB.startupStateConsumer.getCurrentWitness(generic.startupState), null);
+assert.equal(authorityA.startupStateConsumer.getCurrentWitness(generic.startupState) !== null, true);
+assert.equal(getHostExecutionContainmentCurrentWitness(generic.startupState) !== null, true);
+const liveness = authorityA.genericStartupStateIssuer.createStartupState({ currentWitness: { ...one, providerId: "windows-logon-session-liveness" } });
+assert.equal(liveness.ok, false);
+assert.equal("liveDigests" in generic.startupState, false);
+console.log("host execution containment comparison tests passed");

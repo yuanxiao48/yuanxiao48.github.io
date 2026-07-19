@@ -16,6 +16,11 @@ import {
 	sameManifestContentIdentity,
 } from "./transcode-manifest-identity.mjs";
 import { isHostBootSessionWitness } from "./host-boot-session-witness.mjs";
+import {
+	createHostExecutionContainmentComparisonAuthority,
+	getHostExecutionContainmentCurrentWitness,
+	isHostExecutionContainmentStartupState,
+} from "./host-execution-containment-comparison.mjs";
 
 const SAFE_JOB_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RECOVERY_CODES = Object.freeze({
@@ -345,6 +350,7 @@ export function createTranscodeStartupRecoveryOrchestrator(dependencies = {}) {
 		throw new TypeError("Startup recovery orchestration dependencies are invalid");
 	}
 	const createIdentity = typeof dependencies.createStartupIdentity === "function" ? dependencies.createStartupIdentity : randomUUID;
+	const legacyContainmentAuthority = createHostExecutionContainmentComparisonAuthority();
 	let runPromise = null;
 	let finalSnapshotCollection = null;
 
@@ -407,10 +413,28 @@ export function createTranscodeStartupRecoveryOrchestrator(dependencies = {}) {
 			})())
 			.map((record) => record.job.id);
 		let sourceAccessWitness = null;
-		if (typeof dependencies.runPreFinalRecoveryPhases === "function" && typeof dependencies.getStartupSourceAccessWitness === "function") {
+		let executionContainmentStartupState = null;
+		if (typeof dependencies.getExecutionContainmentStartupState === "function" && typeof dependencies.getStartupSourceAccessWitness === "function") {
+			return summary({ status: "blockedBeforeRecovery", totalJobs: jobIds.length, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
+		}
+		if (typeof dependencies.getExecutionContainmentStartupState === "function") {
+			try {
+				executionContainmentStartupState = await dependencies.getExecutionContainmentStartupState();
+				if (executionContainmentStartupState !== null && !isHostExecutionContainmentStartupState(executionContainmentStartupState)) throw new Error(RECOVERY_CODES.invalid);
+				sourceAccessWitness = executionContainmentStartupState === null ? null : getHostExecutionContainmentCurrentWitness(executionContainmentStartupState);
+				if (executionContainmentStartupState !== null && !sourceAccessWitness) throw new Error(RECOVERY_CODES.invalid);
+			} catch {
+				return summary({ status: "blockedBeforeRecovery", totalJobs: jobIds.length, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
+			}
+		} else if (typeof dependencies.runPreFinalRecoveryPhases === "function" && typeof dependencies.getStartupSourceAccessWitness === "function") {
 			try {
 				sourceAccessWitness = await dependencies.getStartupSourceAccessWitness();
 				if (sourceAccessWitness !== null && !isHostBootSessionWitness(sourceAccessWitness)) throw new Error(RECOVERY_CODES.invalid);
+				if (sourceAccessWitness !== null) {
+					const wrapped = legacyContainmentAuthority.genericStartupStateIssuer.createStartupState({ currentWitness: sourceAccessWitness });
+					if (!wrapped.ok) throw new Error(RECOVERY_CODES.invalid);
+					executionContainmentStartupState = wrapped.startupState;
+				}
 			} catch {
 				return summary({ status: "blockedBeforeRecovery", totalJobs: jobIds.length, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });
 			}
@@ -423,6 +447,7 @@ export function createTranscodeStartupRecoveryOrchestrator(dependencies = {}) {
 				startupMonotonicTimeMs: dependencies.monotonicNowMs(),
 				preexistingHoldJobIds,
 				sourceAccessWitness,
+				executionContainmentStartupState,
 			});
 		} catch {
 			return summary({ status: "blockedBeforeRecovery", totalJobs: jobIds.length, recoveryCompleted: false, requiresLockPlanning: false, mustBlockListen: true, criticalCount: 1, batchResult: null });

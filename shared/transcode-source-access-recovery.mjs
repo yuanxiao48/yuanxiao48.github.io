@@ -5,7 +5,14 @@
 import {
 	compareHostBootSessionWitness,
 	isHostBootSessionWitness,
+	sameHostBootSessionWitnessIdentity,
 } from "./host-boot-session-witness.mjs";
+import {
+	compareHostExecutionContainment,
+	getHostExecutionContainmentCurrentWitness,
+	isHostExecutionContainmentStartupState,
+	HOST_EXECUTION_CONTAINMENT_RESULTS,
+} from "./host-execution-containment-comparison.mjs";
 import {
 	createPreExecutionRecovery,
 	normalizePreExecutionRecovery,
@@ -68,6 +75,21 @@ function sourceAccessFields(job) {
 		hasRawPreExecution: hasRaw(job?.preExecutionRecovery),
 		hasRawEvidence: hasRaw(job?.sourceProbeEvidence),
 	});
+}
+
+function containmentState(context, supplied) {
+	if (context?.getExecutionContainmentStartupState) return context.getExecutionContainmentStartupState();
+	return supplied;
+}
+
+function containmentComparison({ state, persisted, currentWitness }) {
+	if (state !== null && state !== undefined) return compareHostExecutionContainment(state, persisted);
+	if (!isHostBootSessionWitness(currentWitness)) return freeze({ classification: HOST_EXECUTION_CONTAINMENT_RESULTS.unavailable, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessUnavailable });
+	const relation = compareHostBootSessionWitness(persisted, currentWitness);
+	if (relation.relation === "same-session") return freeze({ classification: HOST_EXECUTION_CONTAINMENT_RESULTS.retained, code: null });
+	if (relation.relation === "different-session") return freeze({ classification: HOST_EXECUTION_CONTAINMENT_RESULTS.terminated, code: null });
+	if (relation.relation === "incomparable") return freeze({ classification: HOST_EXECUTION_CONTAINMENT_RESULTS.incomparable, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessIncomparable });
+	return freeze({ classification: relation.relation === "malformed" ? HOST_EXECUTION_CONTAINMENT_RESULTS.malformed : HOST_EXECUTION_CONTAINMENT_RESULTS.unavailable, code: relation.code || TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessUnavailable });
 }
 
 function nextWithSourceAccess(job, witness, origin, nowIso) {
@@ -139,7 +161,7 @@ export function createSourceAccessRecoveryResolver({ persistManifestCas, validat
 		recordedThisStartup.set(context, jobs);
 	}
 
-	async function resolve({ snapshot, currentBootWitness = null, context = null } = {}) {
+	async function resolve({ snapshot, currentBootWitness = null, executionContainmentStartupState = null, context = null } = {}) {
 		if (!validSnapshot(snapshot)) return stableResult({ status: "critical", holdActive: true, mustBlockListen: true, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.sourceInvalid });
 		const job = snapshot.job;
 		if (TERMINAL_STATES.has(job.state)) return stableResult({ status: "terminalProtected" });
@@ -157,24 +179,37 @@ export function createSourceAccessRecoveryResolver({ persistManifestCas, validat
 		if (!source?.ok || !["library", "upload"].includes(source.sourceType)) {
 			return stableResult({ status: "critical", holdActive: true, mustBlockListen: true, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.sourceInvalid });
 		}
+		let state;
+		try { state = containmentState(context, executionContainmentStartupState); } catch { state = {}; }
+		if (state !== null && state !== undefined && !isHostExecutionContainmentStartupState(state)) {
+			return stableResult({ status: "critical", holdActive: true, mustBlockListen: true, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessMalformed });
+		}
+		const stateWitness = state === null || state === undefined ? null : getHostExecutionContainmentCurrentWitness(state);
+		const effectiveCurrentWitness = stateWitness || currentBootWitness;
 		if (currentBootWitness !== null && !isHostBootSessionWitness(currentBootWitness)) {
 			return stableResult({ status: "holdRetained", holdActive: true, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessUnavailable });
 		}
+		if (stateWitness && currentBootWitness && !sameHostBootSessionWitnessIdentity(stateWitness, currentBootWitness).equal) {
+			return stableResult({ status: "critical", holdActive: true, mustBlockListen: true, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessMalformed });
+		}
 		const evidenceWitness = fields.evidence.evidence?.bootWitness || null;
 		const recoveryWitness = fields.preExecution.recovery?.sourceAccessWitness || null;
-		if (evidenceWitness && recoveryWitness && compareHostBootSessionWitness(evidenceWitness, recoveryWitness).relation !== "same-session") {
+		if (evidenceWitness && recoveryWitness && !sameHostBootSessionWitnessIdentity(evidenceWitness, recoveryWitness).equal) {
 			return stableResult({ status: "critical", holdActive: true, mustBlockListen: true, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.evidenceStale });
 		}
 		const previousWitness = evidenceWitness || recoveryWitness;
 		if (!fields.hasSourceAccess && evidenceWitness) {
-			if (!isHostBootSessionWitness(currentBootWitness)) {
+			if (!isHostBootSessionWitness(effectiveCurrentWitness)) {
 				const written = await persistSnapshot(persistManifestCas, snapshot, nextWithSourceAccess(job, evidenceWitness, "managed-job-probe", nowIso()));
 				return written === "written"
 					? stableResult({ status: "holdRetained", manifestChanged: true, holdActive: true, finalRereadRequired: true, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessUnavailable })
 					: stableResult({ status: written === "terminal" ? "terminalProtected" : "critical", holdActive: written !== "terminal", mustBlockListen: written !== "terminal", code: written === "terminal" ? null : TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessRecordFailed });
 			}
-			const relation = compareHostBootSessionWitness(evidenceWitness, currentBootWitness);
-			if (relation.relation === "different-session") {
+			const compared = containmentComparison({ state, persisted: evidenceWitness, currentWitness: effectiveCurrentWitness });
+			if (compared.classification === HOST_EXECUTION_CONTAINMENT_RESULTS.malformed) {
+				return stableResult({ status: "critical", holdActive: true, mustBlockListen: true, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessMalformed });
+			}
+			if (compared.classification === HOST_EXECUTION_CONTAINMENT_RESULTS.terminated) {
 				const written = await persistSnapshot(persistManifestCas, snapshot, nextWithoutSourceAccess(job, nowIso(), { interrupt: true }));
 				return written === "written"
 					? stableResult({ status: "holdCleared", manifestChanged: true, finalRereadRequired: true })
@@ -182,23 +217,24 @@ export function createSourceAccessRecoveryResolver({ persistManifestCas, validat
 			}
 			const written = await persistSnapshot(persistManifestCas, snapshot, nextWithSourceAccess(job, evidenceWitness, "managed-job-probe", nowIso()));
 			return written === "written"
-				? stableResult({ status: "holdRetained", manifestChanged: true, holdActive: true, finalRereadRequired: true, code: relation.relation === "same-session" ? null : TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessIncomparable })
+				? stableResult({ status: "holdRetained", manifestChanged: true, holdActive: true, finalRereadRequired: true, code: compared.classification === HOST_EXECUTION_CONTAINMENT_RESULTS.retained ? null : compared.classification === HOST_EXECUTION_CONTAINMENT_RESULTS.incomparable ? TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessIncomparable : TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessUnavailable })
 				: stableResult({ status: written === "terminal" ? "terminalProtected" : "critical", holdActive: written !== "terminal", mustBlockListen: written !== "terminal", code: written === "terminal" ? null : TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessRecordFailed });
 		}
 		if (!previousWitness) {
-			if (!isHostBootSessionWitness(currentBootWitness)) return stableResult({ status: "holdRetained", holdActive: true, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessUnavailable });
-			const written = await persistSnapshot(persistManifestCas, snapshot, nextWithSourceAccess(job, currentBootWitness, "legacy-observed", nowIso()));
+			if (!isHostBootSessionWitness(effectiveCurrentWitness)) return stableResult({ status: "holdRetained", holdActive: true, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessUnavailable });
+			const written = await persistSnapshot(persistManifestCas, snapshot, nextWithSourceAccess(job, effectiveCurrentWitness, "legacy-observed", nowIso()));
 			if (written === "written") {
 				markRecorded(context, job.id);
 				return stableResult({ status: "witnessRecorded", manifestChanged: true, holdActive: true, finalRereadRequired: true });
 			}
 			return stableResult({ status: written === "terminal" ? "terminalProtected" : "critical", holdActive: written !== "terminal", mustBlockListen: written !== "terminal", code: written === "terminal" ? null : TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessRecordFailed });
 		}
-		if (!isHostBootSessionWitness(currentBootWitness)) return stableResult({ status: "holdRetained", holdActive: true, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessUnavailable });
-		const compared = compareHostBootSessionWitness(previousWitness, currentBootWitness);
-		if (compared.relation === "same-session") return stableResult({ status: "holdRetained", holdActive: true });
-		if (compared.relation !== "different-session" || wasRecorded(context, job.id)) {
-			return stableResult({ status: "holdRetained", holdActive: true, code: compared.relation === "incomparable" ? TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessIncomparable : TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessMalformed });
+		if (!isHostBootSessionWitness(effectiveCurrentWitness)) return stableResult({ status: "holdRetained", holdActive: true, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessUnavailable });
+		const compared = containmentComparison({ state, persisted: previousWitness, currentWitness: effectiveCurrentWitness });
+		if (compared.classification === HOST_EXECUTION_CONTAINMENT_RESULTS.malformed) return stableResult({ status: "critical", holdActive: true, mustBlockListen: true, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessMalformed });
+		if (compared.classification === HOST_EXECUTION_CONTAINMENT_RESULTS.retained) return stableResult({ status: "holdRetained", holdActive: true });
+		if (compared.classification !== HOST_EXECUTION_CONTAINMENT_RESULTS.terminated || wasRecorded(context, job.id)) {
+			return stableResult({ status: "holdRetained", holdActive: true, code: compared.classification === HOST_EXECUTION_CONTAINMENT_RESULTS.incomparable ? TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessIncomparable : TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.witnessUnavailable });
 		}
 		const written = await persistSnapshot(persistManifestCas, snapshot, nextWithoutSourceAccess(job, nowIso()));
 		if (written === "written") return stableResult({ status: "holdCleared", manifestChanged: true, finalRereadRequired: true });
@@ -228,7 +264,7 @@ export function createSourceAccessRecoveryPreFinalPhase({ readJob, resolver } = 
 				if (fields.hasSourceAccess && !fields.preExecution.recovery?.sourceAccessWitness) counts.legacy += 1;
 				if (fields.evidence.evidence) counts.evidence += 1;
 				let outcome;
-				try { outcome = await resolver.resolve({ snapshot, currentBootWitness: context?.getSourceAccessWitness?.() || null, context }); }
+				try { outcome = await resolver.resolve({ snapshot, currentBootWitness: context?.getSourceAccessWitness?.() || null, executionContainmentStartupState: context?.getExecutionContainmentStartupState?.() || null, context }); }
 				catch { outcome = stableResult({ status: "critical", holdActive: true, mustBlockListen: true, code: TRANSCODE_SOURCE_ACCESS_RECOVERY_CODES.phaseFailed }); }
 				if (outcome.status === "witnessRecorded") counts.recorded += 1;
 				if (outcome.status === "holdCleared") counts.cleared += 1;
