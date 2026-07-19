@@ -1,0 +1,21 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+
+const root = new URL("../native/windows-logon-session-snapshot-helper/", import.meta.url);
+const read = (name) => readFile(new URL(name, root), "utf8");
+const [header, protocol, helper, cmake, test] = await Promise.all([read("protocol.h"), read("protocol.c"), read("helper.c"), read("CMakeLists.txt"), read("test-protocol.c")]);
+assert.match(header, /SLS1_MAX_SESSION_COUNT 4096u/);
+assert.match(protocol, /SLS1_SCHEMA_VERSION/);
+for (const name of ["OpenProcessToken", "TOKEN_QUERY", "TokenStatistics", "LsaEnumerateLogonSessions", "LsaGetLogonSessionData", "LsaFreeReturnBuffer", "CloseHandle", "WriteFile"]) assert.match(helper, new RegExp(name));
+for (const forbidden of ["CreateProcess(", "ShellExecute", "WinExec", "system(", "popen", "PowerShell", "wmic", "wevtutil", "NtQuerySystemInformation", "printf(", "fprintf(", "puts("]) assert.equal(helper.includes(forbidden), false, forbidden);
+assert.match(helper, /if \(argc != 1\) return 2/);
+assert.match(helper, /current_session_data->LogonType/);
+assert.match(helper, /qsort\(/);
+assert.match(cmake, /Advapi32 Secur32/);
+assert.match(cmake, /\/W4 \/WX \/GS \/sdl/);
+assert.equal(cmake.includes("POST_BUILD"), false);
+assert.equal(cmake.includes("FetchContent"), false);
+assert.doesNotMatch(test, /OpenProcessToken|LsaEnumerateLogonSessions|LsaGetLogonSessionData/);
+assert.equal(join("a", "b"), "a\\b");
+console.log("windows logon-session helper source contract tests passed");
