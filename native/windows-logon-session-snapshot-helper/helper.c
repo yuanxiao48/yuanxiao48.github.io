@@ -29,7 +29,7 @@ static int write_all(HANDLE output, const uint8_t *bytes, size_t length) {
 	size_t offset = 0u;
 	if (output == NULL || output == INVALID_HANDLE_VALUE) return 0;
 	while (offset < length) {
-		DWORD requested = (length - offset) > (size_t)DWORD_MAX ? DWORD_MAX : (DWORD)(length - offset);
+		DWORD requested = (length - offset) > (size_t)MAXDWORD ? MAXDWORD : (DWORD)(length - offset);
 		DWORD written = 0u;
 		if (!WriteFile(output, bytes + offset, requested, &written, NULL) || written == 0u) return 0;
 		offset += (size_t)written;
@@ -42,8 +42,8 @@ int main(int argc, char **argv) {
 	DWORD statistics_bytes = 0u;
 	PTOKEN_STATISTICS statistics = NULL;
 	LUID current_luid;
-	LSA_STATUS status;
-	PLSA_LOGON_SESSION_DATA current_session_data = NULL;
+	NTSTATUS status;
+	PSECURITY_LOGON_SESSION_DATA current_session_data = NULL;
 	ULONG session_count = 0u;
 	PLUID session_luids = NULL;
 	uint8_t current_bytes[SLS1_LUID_BYTES];
@@ -66,7 +66,7 @@ int main(int argc, char **argv) {
 	current_luid = statistics->AuthenticationId;
 
 	status = LsaGetLogonSessionData(&current_luid, &current_session_data);
-	if (status != 0 || current_session_data == NULL || current_session_data->Size < sizeof(LSA_LOGON_SESSION_DATA)) goto cleanup;
+	if (status != 0 || current_session_data == NULL || current_session_data->Size < sizeof(SECURITY_LOGON_SESSION_DATA)) goto cleanup;
 	current_logon_type = (uint16_t)current_session_data->LogonType;
 	if (!(current_logon_type == 2u || current_logon_type == 10u || current_logon_type == 11u || current_logon_type == 12u)) goto cleanup;
 
