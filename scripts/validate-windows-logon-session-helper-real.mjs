@@ -5,6 +5,7 @@ import { basename, dirname, win32 } from "node:path";
 import { spawn } from "node:child_process";
 import {
 	createWindowsLogonSessionRealValidator,
+	getWindowsLogonSessionRealValidationExitCode,
 	WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES,
 } from "../shared/windows-logon-session-real-validator.mjs";
 
@@ -91,19 +92,6 @@ async function waitForIdleWithDeadline({ waitForIdle, requestShutdown, timeoutMs
 	}
 }
 
-function exitCodeFor(code) {
-	if ([WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.platformInvalid, WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperPathInvalid,
-		WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperFileInvalid, WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperTooLarge].includes(code)) return 2;
-	if ([WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperHashFailed, WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperHashMismatch,
-		WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperChanged].includes(code)) return 3;
-	if ([WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerFailed, WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerStateInvalid,
-		WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerDisposeFailed].includes(code)) return 4;
-	if ([WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.snapshotInvalid, WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.providerUnavailable,
-		WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.containmentInvalid].includes(code)) return 5;
-	if (code === WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.idleUnconfirmed) return 6;
-	return 7;
-}
-
 const parsed = parseArguments(process.argv.slice(2));
 if (!parsed || basename(parsed.helperPath).toLowerCase() !== EXPECTED_BASENAME || !win32.isAbsolute(parsed.helperPath)) {
 	process.stderr.write(`${JSON.stringify({ schemaVersion: 1, status: "failed", code: WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperPathInvalid })}\n`);
@@ -126,6 +114,6 @@ if (!parsed || basename(parsed.helperPath).toLowerCase() !== EXPECTED_BASENAME |
 	if (result.ok) process.stdout.write(`${JSON.stringify({ ...result.summary, status: "passed" })}\n`);
 	else {
 		process.stderr.write(`${JSON.stringify({ schemaVersion: 1, status: "failed", code: result.code })}\n`);
-		process.exitCode = exitCodeFor(result.code);
+		process.exitCode = getWindowsLogonSessionRealValidationExitCode(result.code);
 	}
 }

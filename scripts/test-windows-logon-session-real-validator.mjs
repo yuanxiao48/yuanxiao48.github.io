@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
 	createWindowsLogonSessionRealValidator,
+	getWindowsLogonSessionRealValidationExitCode,
 	WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES,
 } from "../shared/windows-logon-session-real-validator.mjs";
 
@@ -108,6 +109,14 @@ for (const inspection of [
 	const result = await succeed(h, { helperPath: PATH, expectedSha256: HASH }); assert.equal(result.code, WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperChanged);
 }
 {
+	let inspections = 0;
+	const h = harness({ inspectHelperFile: async () => {
+		inspections += 1;
+		return { exists: true, isFile: true, isSymbolicLink: false, canonicalPathMatches: true, size: inspections === 1 ? 1024 : 1025 };
+	} });
+	const result = await succeed(h, { helperPath: PATH, expectedSha256: HASH }); assert.equal(result.code, WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperChanged);
+}
+{
 	const h = harness(); const pending = h.validator.validate({ helperPath: PATH, expectedSha256: HASH }); await waitForSpawn(); h.child.stderr.emit("data", Buffer.from([1])); h.child.close(); assert.equal((await pending).code, WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerFailed);
 }
 {
@@ -119,4 +128,9 @@ for (const inspection of [
 {
 	const h = harness(); const pending = h.validator.validate({ helperPath: PATH, expectedSha256: HASH }); await waitForSpawn(); h.timers.advance(1500); await Promise.resolve(); h.timers.advance(250); await Promise.resolve(); h.timers.advance(1250); await Promise.resolve(); h.child.close(1); assert.equal((await pending).code, WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerFailed); assert.equal(h.counts().soft, 1); assert.equal(h.counts().force, 1);
 }
+assert.equal(getWindowsLogonSessionRealValidationExitCode(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.expectedHashInvalid), 2);
+assert.equal(getWindowsLogonSessionRealValidationExitCode(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperHashMismatch), 3);
+assert.equal(getWindowsLogonSessionRealValidationExitCode(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerFailed), 4);
+assert.equal(getWindowsLogonSessionRealValidationExitCode(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.providerUnavailable), 5);
+assert.equal(getWindowsLogonSessionRealValidationExitCode(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.idleUnconfirmed), 6);
 console.log("windows logon-session real validator tests passed");

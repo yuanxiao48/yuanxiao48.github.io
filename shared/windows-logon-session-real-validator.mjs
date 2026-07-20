@@ -41,6 +41,20 @@ export const WINDOWS_LOGON_SESSION_REAL_VALIDATION_POLICY = Object.freeze({
 	idleConfirmationTimeoutMs: IDLE_CONFIRMATION_TIMEOUT_MS,
 });
 
+export function getWindowsLogonSessionRealValidationExitCode(code) {
+	if ([WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.platformInvalid, WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperPathInvalid,
+		WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.expectedHashInvalid, WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperFileInvalid,
+		WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperTooLarge].includes(code)) return 2;
+	if ([WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperHashFailed, WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperHashMismatch,
+		WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperChanged].includes(code)) return 3;
+	if ([WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerFailed, WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerStateInvalid,
+		WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerDisposeFailed].includes(code)) return 4;
+	if ([WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.snapshotInvalid, WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.providerUnavailable,
+		WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.containmentInvalid].includes(code)) return 5;
+	if (code === WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.idleUnconfirmed) return 6;
+	return 7;
+}
+
 function freeze(value) { return Object.freeze(value); }
 function record(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function failure(code) { return freeze({ ok: false, code, summary: null }); }
@@ -154,6 +168,12 @@ export function createWindowsLogonSessionRealValidator(dependencies = {}) {
 		const disposed = runner.dispose();
 		if (disposed?.disposed !== true) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerDisposeFailed);
 
+		let postInspection;
+		try { postInspection = await dependencies.inspectHelperFile(helperPath); }
+		catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperChanged); }
+		if (!validInspection(postInspection) || postInspection.size !== inspection.size) {
+			return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperChanged);
+		}
 		let postHash;
 		try { postHash = await dependencies.hashHelperFile(helperPath); }
 		catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperHashFailed); }
