@@ -101,7 +101,8 @@ function validDependencies(value) {
 	return record(value) && typeof value.inspectHelperFile === "function" && typeof value.inspectHelperDirectory === "function"
 		&& typeof value.resolveTrustedWorkingDirectory === "function" && typeof value.hashHelperFile === "function"
 		&& typeof value.spawnHelper === "function" && typeof value.scheduleTimer === "function" && typeof value.cancelTimer === "function"
-		&& typeof value.monotonicNow === "function" && typeof value.hashBytes === "function";
+		&& typeof value.monotonicNow === "function" && typeof value.hashBytes === "function"
+		&& (value.createLivenessProvider === undefined || typeof value.createLivenessProvider === "function");
 }
 
 export function isWindowsLogonSessionKnownChildControl(value) { return controls.has(value); }
@@ -110,29 +111,40 @@ export function createWindowsLogonSessionKnownChildControl(child) {
 	if (!record(child) || typeof child.kill !== "function" || typeof child.unref !== "function" || typeof child.once !== "function") {
 		throw new TypeError("Windows logon-session known child is invalid");
 	}
-	const state = { closeObserved: false, softStopRequested: false, forceStopRequested: false, stdoutReleased: false, stderrReleased: false, stdinReleased: false, childUnrefed: false, containedAfterDeadline: false };
+	const state = {
+		closeObserved: false,
+		softStopRequested: false, softStopAttempted: false, softStopSucceeded: false,
+		forceStopRequested: false, forceStopAttempted: false, forceStopSucceeded: false,
+		stdoutReleaseAttempted: false, stdoutReleased: false,
+		stderrReleaseAttempted: false, stderrReleased: false,
+		stdinReleaseAttempted: false, stdinReleased: false,
+		childUnrefAttempted: false, childUnrefed: false,
+		containedAfterDeadline: false,
+	};
 	child.once("close", () => { state.closeObserved = true; });
-	function request(signal, key) {
-		if (state[key]) return freeze({ requested: false, alreadyRequested: true });
-		state[key] = true;
-		try { child.kill(signal); } catch {}
-		return freeze({ requested: true, alreadyRequested: false });
+	function request(signal, requestedKey, attemptedKey, succeededKey) {
+		if (state[requestedKey]) return freeze({ requested: false, alreadyRequested: true, succeeded: state[succeededKey] });
+		state[requestedKey] = true;
+		state[attemptedKey] = true;
+		try { state[succeededKey] = child.kill(signal) !== false; } catch {}
+		return freeze({ requested: true, alreadyRequested: false, succeeded: state[succeededKey] });
 	}
-	function release(streamName, stateName) {
-		if (state[stateName]) return;
-		state[stateName] = true;
-		try { child[streamName]?.destroy?.(); } catch {}
+	function release(streamName, attemptedKey, succeededKey) {
+		if (state[attemptedKey]) return;
+		if (!child[streamName]) return;
+		state[attemptedKey] = true;
+		try { child[streamName].destroy(); state[succeededKey] = true; } catch {}
 	}
-	function requestSoftStop() { return request("SIGTERM", "softStopRequested"); }
-	function requestForceStop() { return request("SIGKILL", "forceStopRequested"); }
+	function requestSoftStop() { return request("SIGTERM", "softStopRequested", "softStopAttempted", "softStopSucceeded"); }
+	function requestForceStop() { return request("SIGKILL", "forceStopRequested", "forceStopAttempted", "forceStopSucceeded"); }
 	function containAfterDeadline() {
 		if (state.containedAfterDeadline) return getSafeState();
 		state.containedAfterDeadline = true;
 		requestForceStop();
-		release("stdout", "stdoutReleased");
-		release("stderr", "stderrReleased");
-		release("stdin", "stdinReleased");
-		if (!state.childUnrefed) { state.childUnrefed = true; try { child.unref(); } catch {} }
+		release("stdout", "stdoutReleaseAttempted", "stdoutReleased");
+		release("stderr", "stderrReleaseAttempted", "stderrReleased");
+		release("stdin", "stdinReleaseAttempted", "stdinReleased");
+		if (!state.childUnrefAttempted) { state.childUnrefAttempted = true; try { child.unref(); state.childUnrefed = true; } catch {} }
 		return getSafeState();
 	}
 	function getSafeState() { return freeze({ ...state }); }
@@ -173,6 +185,7 @@ function safeSummary(snapshotConsumer, snapshot) {
 
 export function createWindowsLogonSessionRealValidator(dependencies = {}) {
 	if (!validDependencies(dependencies)) throw new TypeError("Windows logon-session real validator dependencies are invalid");
+	const createLivenessProvider = dependencies.createLivenessProvider || createWindowsLogonSessionLivenessProvider;
 	let used = false;
 	async function validate({ helperPath, expectedSha256 } = {}) {
 		if (used) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.alreadyUsed);
@@ -181,13 +194,13 @@ export function createWindowsLogonSessionRealValidator(dependencies = {}) {
 		if (!validWindowsHelperPath(helperPath)) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperPathInvalid);
 		if (typeof expectedSha256 !== "string" || !SHA256.test(expectedSha256)) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.expectedHashInvalid);
 		const directory = helperDirectory(helperPath);
+		let directoryInspection;
+		try { directoryInspection = await dependencies.inspectHelperDirectory(directory); } catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperDirectoryInvalid); }
+		if (!validHelperDirectory(directoryInspection)) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperDirectoryInvalid);
 		let inspection;
 		try { inspection = await dependencies.inspectHelperFile(helperPath); } catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperFileInvalid); }
 		if (!validInspection(inspection)) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperFileInvalid);
 		if (inspection.size > MAX_HELPER_BYTES) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperTooLarge);
-		let directoryInspection;
-		try { directoryInspection = await dependencies.inspectHelperDirectory(directory); } catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperDirectoryInvalid); }
-		if (!validHelperDirectory(directoryInspection)) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperDirectoryInvalid);
 		let trustedWorkingDirectory;
 		try { trustedWorkingDirectory = await dependencies.resolveTrustedWorkingDirectory(); } catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.trustedWorkingDirectoryInvalid); }
 		if (!validWorkingDirectory(trustedWorkingDirectory, directory)) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.trustedWorkingDirectoryInvalid);
@@ -216,41 +229,51 @@ export function createWindowsLogonSessionRealValidator(dependencies = {}) {
 				policy: RUNNER_POLICY,
 			});
 		} catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.unexpected); }
-		const provider = createWindowsLogonSessionLivenessProvider({ snapshotRunner: runner, snapshotConsumer: protocol.snapshotConsumer, containmentAuthority, hash: dependencies.hashBytes });
 		const attemptStart = dependencies.monotonicNow();
 		const absoluteIdleDeadline = attemptStart + ABSOLUTE_IDLE_DEADLINE_MS;
 		let run;
-		let providerResult;
 		try {
-			const runPromise = runner.runOnce();
-			const providerPromise = provider.getStartupState();
-			[run, providerResult] = await Promise.all([runPromise, providerPromise]);
+			run = await runner.runOnce();
 		} catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerFailed); }
 		const idleConfirmed = await confirmIdleBeforeDeadline({ runner, control, deadline: absoluteIdleDeadline, monotonicNow: dependencies.monotonicNow, scheduleTimer: dependencies.scheduleTimer, cancelTimer: dependencies.cancelTimer });
 		if (idleConfirmed !== true) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.idleContainmentRequired);
 		if (runner.getSafeState().activeChildCount !== 0) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerStateInvalid);
-		const disposed = runner.dispose();
-		if (disposed?.disposed !== true) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerDisposeFailed);
+		function disposeAfterIdle(code) {
+			try {
+				const disposed = runner.dispose();
+				return disposed?.disposed === true ? failure(code) : failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerDisposeFailed);
+			} catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerDisposeFailed); }
+		}
+		if (!run?.ok || !run.snapshot) return disposeAfterIdle(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerFailed);
 
-		let postInspection;
-		try { postInspection = await dependencies.inspectHelperFile(helperPath); } catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperChanged); }
-		if (!validInspection(postInspection) || postInspection.size !== inspection.size) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperChanged);
 		let postDirectoryInspection;
-		try { postDirectoryInspection = await dependencies.inspectHelperDirectory(directory); } catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperDirectoryChanged); }
-		if (!validHelperDirectory(postDirectoryInspection)) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperDirectoryChanged);
+		try { postDirectoryInspection = await dependencies.inspectHelperDirectory(directory); } catch { return disposeAfterIdle(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperDirectoryChanged); }
+		if (!validHelperDirectory(postDirectoryInspection)) return disposeAfterIdle(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperDirectoryChanged);
+		let postInspection;
+		try { postInspection = await dependencies.inspectHelperFile(helperPath); } catch { return disposeAfterIdle(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperChanged); }
+		if (!validInspection(postInspection) || postInspection.size !== inspection.size) return disposeAfterIdle(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperChanged);
 		let postHash;
-		try { postHash = await dependencies.hashHelperFile(helperPath); } catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperHashFailed); }
-		if (postHash !== expectedSha256 || postHash !== initialHash) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperChanged);
-		if (!run?.ok || !run.snapshot) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerFailed);
+		try { postHash = await dependencies.hashHelperFile(helperPath); } catch { return disposeAfterIdle(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperHashFailed); }
+		if (postHash !== expectedSha256 || postHash !== initialHash) return disposeAfterIdle(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperChanged);
 		const snapshot = safeSummary(protocol.snapshotConsumer, run.snapshot);
-		if (!snapshot) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.snapshotInvalid);
-		if (!providerResult?.ok || providerResult.unavailable === true || !providerResult.startupState) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.providerUnavailable);
+		if (!snapshot) return disposeAfterIdle(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.snapshotInvalid);
+		let provider;
+		let providerResult;
+		try {
+			provider = createLivenessProvider({ snapshotRunner: runner, snapshotConsumer: protocol.snapshotConsumer, containmentAuthority, hash: dependencies.hashBytes });
+			providerResult = await provider.getStartupState();
+		} catch { return disposeAfterIdle(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.providerUnavailable); }
+		if (!providerResult?.ok || providerResult.unavailable === true || !providerResult.startupState) return disposeAfterIdle(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.providerUnavailable);
 		const witness = containmentAuthority.startupStateConsumer.getCurrentWitness(providerResult.startupState);
 		const serializedWitness = serializeHostBootSessionWitness(witness);
 		const compared = containmentAuthority.startupStateConsumer.comparePersistedWitness(providerResult.startupState, witness);
 		if (!serializedWitness || serializedWitness.providerId !== WINDOWS_LOGON_SESSION_LIVENESS_PROVIDER_ID
 			|| serializedWitness.providerVersion !== WINDOWS_LOGON_SESSION_LIVENESS_PROVIDER_VERSION
-			|| compared?.classification !== HOST_EXECUTION_CONTAINMENT_RESULTS.retained) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.containmentInvalid);
+			|| compared?.classification !== HOST_EXECUTION_CONTAINMENT_RESULTS.retained) return disposeAfterIdle(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.containmentInvalid);
+		try {
+			const disposed = runner.dispose();
+			if (disposed?.disposed !== true) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerDisposeFailed);
+		} catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerDisposeFailed); }
 		return freeze({ ok: true, code: null, summary: freeze({ schemaVersion: 1, providerId: WINDOWS_LOGON_SESSION_LIVENESS_PROVIDER_ID, providerVersion: WINDOWS_LOGON_SESSION_LIVENESS_PROVIDER_VERSION, currentLogonType: snapshot.currentLogonType, sessionCount: snapshot.sessionCount, helperSha256: expectedSha256, runnerIdleConfirmed: true }) });
 	}
 	return freeze({ validate });
