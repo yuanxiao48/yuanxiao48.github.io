@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createWindowsLogonSessionLivenessProvider } from "../shared/windows-logon-session-liveness-provider.mjs";
+import { WINDOWS_LOGON_SESSION_HELPER_CODES } from "../shared/windows-logon-session-snapshot-runner.mjs";
+import { createWindowsLogonSessionSnapshotProtocolAuthority, WINDOWS_LOGON_SESSION_SNAPSHOT_CODES } from "../shared/windows-logon-session-snapshot-protocol.mjs";
 import {
 	createWindowsLogonSessionKnownChildControl,
 	createWindowsLogonSessionRealValidator,
@@ -57,7 +59,7 @@ function createRunnerWrapper(realRunner, observation, options) {
 	return Object.freeze({
 		runOnce() {
 			observation.runnerRunOnceCalls += 1;
-			return realRunner.runOnce().then((result) => { observation.events.push(result.ok ? "runner-result-ok" : "runner-result-failed"); return result; });
+			return realRunner.runOnce().then((result) => { observation.runnerResultCodes.push(result.code); observation.events.push(result.ok ? "runner-result-ok" : "runner-result-failed"); return result; });
 		},
 		requestShutdown() { return realRunner.requestShutdown(); },
 		waitForIdle() { return realRunner.waitForIdle(); },
@@ -81,7 +83,7 @@ function createRunnerWrapper(realRunner, observation, options) {
 
 function harness(options = {}) {
 	const timers = clock(); const events = []; const faults = options.faults || new Set(); const child = new FakeChild(events, faults);
-	const observation = { events, spawnCount: 0, providerFactoryCount: 0, providerGetStartupStateCount: 0, disposeCount: 0, validateResolveCount: 0, successResolveCount: 0, runnerRunOnceCalls: 0, containmentCount: 0 };
+	const observation = { events, spawnCount: 0, providerFactoryCount: 0, providerGetStartupStateCount: 0, disposeCount: 0, validateResolveCount: 0, successResolveCount: 0, runnerRunOnceCalls: 0, runnerResultCodes: [], containmentCount: 0 };
 	let inspectCalls = 0; let directoryCalls = 0; let hashCalls = 0; let control = null; let finalRunner = null; let finalConsumer = null; let realConsumer = null;
 	const inspectHelperFile = options.inspectHelperFile || (async () => { inspectCalls += 1; events.push(inspectCalls === 1 ? "pre-metadata" : "post-metadata"); return FILE; });
 	const inspectHelperDirectory = options.inspectHelperDirectory || (async () => { directoryCalls += 1; events.push(directoryCalls === 1 ? "pre-directory" : "post-directory"); return DIRECTORY_OK; });
@@ -153,6 +155,16 @@ async function failAtHardDeadline(h, lateClose = false) {
 	if (lateClose) { h.timers.advance(999); h.child.close(1); await tick(); } else { assert.deepEqual(h.timers.pendingDelays(), [1000]); h.timers.advance(1000); await tick(); }
 	return resolve(h, pending);
 }
+async function failAtSoftTimeoutBeforeHardDeadline(h) {
+	const { pending } = await start(h);
+	h.timers.advance(1500); await tick();
+	assert.equal(h.timers.now, 1500); assert.deepEqual(h.child.killSignals, ["SIGTERM"]);
+	assert.equal(h.events.includes("kill:SIGKILL"), false); assert.deepEqual(h.timers.pendingDelays().sort((left, right) => left - right), [250, 1500]);
+	h.child.close(0); return resolve(h, pending);
+}
+function completeMalformedMagicDocument() {
+	const document = snapshot(); document.write("BAD!", 0, "ascii"); return document;
+}
 function assertSafeFailure(result) {
 	assert.equal(result.ok, false); assert.equal(result.summary, null); assert.equal(Object.isFrozen(result), true);
 	const text = JSON.stringify(result);
@@ -209,6 +221,19 @@ for (const document of [snapshot({ live: [2, 1] }), snapshot({ live: [1, 1], cur
 }
 {
 	const h = harness(); const { pending } = await start(h); h.child.close(1); await assertProviderZeroFailure(h, await resolve(h, pending), { code: WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerFailed, exitCode: 4, spawnCount: 1, disposeCount: 1 });
+}
+{
+	const h = harness(); const result = await failAtSoftTimeoutBeforeHardDeadline(h);
+	await assertProviderZeroFailure(h, result, { code: WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerFailed, exitCode: 4, spawnCount: 1, disposeCount: 1 });
+	assert.deepEqual(h.observation.runnerResultCodes, [WINDOWS_LOGON_SESSION_HELPER_CODES.timeout]); assert.equal(h.events.includes("child.unref"), false);
+	assert.equal(h.child.stdout.destroyCalls, 0); assert.equal(h.child.stderr.destroyCalls, 0); assert.equal(h.child.stdin.destroyCalls, 0);
+}
+{
+	const document = completeMalformedMagicDocument(); const decoded = createWindowsLogonSessionSnapshotProtocolAuthority().decoder.decode(document);
+	assert.equal(document.length, snapshot().length); assert.equal(decoded.code, WINDOWS_LOGON_SESSION_SNAPSHOT_CODES.magicInvalid);
+	for (const code of [WINDOWS_LOGON_SESSION_SNAPSHOT_CODES.lengthInvalid, WINDOWS_LOGON_SESSION_SNAPSHOT_CODES.duplicate, WINDOWS_LOGON_SESSION_SNAPSHOT_CODES.unsorted, WINDOWS_LOGON_SESSION_SNAPSHOT_CODES.currentMissing, WINDOWS_LOGON_SESSION_SNAPSHOT_CODES.logonTypeUnsupported]) assert.notEqual(decoded.code, code);
+	const h = harness(); await assertProviderZeroFailure(h, await succeed(h, document), { code: WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.runnerFailed, exitCode: 4, spawnCount: 1, disposeCount: 1 });
+	assert.deepEqual(h.observation.runnerResultCodes, [WINDOWS_LOGON_SESSION_HELPER_CODES.protocolInvalid]);
 }
 {
 	const h = harness(); await assertProviderZeroFailure(h, await failAtHardDeadline(h), { code: WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.idleContainmentRequired, exitCode: 6, spawnCount: 1, disposeCount: 0 });
