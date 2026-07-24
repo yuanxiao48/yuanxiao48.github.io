@@ -122,31 +122,42 @@ jobs:
           $dumpbinItem = Get-Item -LiteralPath $dumpbin
           if (-not $dumpbin.StartsWith($vsRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or (($dumpbinItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or $dumpbinItem.PSIsContainer) { throw 'dumpbin origin invalid' }
           function Invoke-DumpbinEvidence([string]$switch, [string]$name) {
-            $path = Join-Path $evidence $name
-            & $dumpbin $switch $helper.FullName | Out-File -LiteralPath $path -Encoding utf8
-            if ($LASTEXITCODE -ne 0 -or (Get-Item -LiteralPath $path).Length -le 0) { throw 'dumpbin evidence invalid' }
+            $stdoutPath = Join-Path $evidence ($name + '.stdout.txt')
+            $stderrPath = Join-Path $evidence ($name + '.stderr.txt')
+            & $dumpbin $switch $helper.FullName 1> $stdoutPath 2> $stderrPath
+            $exitCode = $LASTEXITCODE
+            return [PSCustomObject]@{ Name = $name; StdoutPath = $stdoutPath; StderrPath = $stderrPath; ExitCode = $exitCode }
           }
-          Invoke-DumpbinEvidence '/headers' 'headers.txt'
-          Invoke-DumpbinEvidence '/dependents' 'dependents.txt'
-          Invoke-DumpbinEvidence '/imports' 'imports.txt'
-          Invoke-DumpbinEvidence '/loadconfig' 'loadconfig.txt'
+          $dumpbinResults = @(
+            Invoke-DumpbinEvidence '/headers' 'headers'
+            Invoke-DumpbinEvidence '/dependents' 'dependents'
+            Invoke-DumpbinEvidence '/imports' 'imports'
+            Invoke-DumpbinEvidence '/loadconfig' 'loadconfig'
+          )
+          $userProfile = $null
+          if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+            try { $userProfile = (Resolve-Path -LiteralPath $env:USERPROFILE -ErrorAction Stop).Path } catch { throw 'USERPROFILE_UNAVAILABLE' }
+          }
+          function Test-AbsolutePathResidue([string]$text) {
+            if ($null -eq $text) { return $false }
+            $driveRooted = '(?<![A-Za-z0-9+.\-])[A-Za-z]:[\\/]'
+            $backslashUnc = '\\\\[^\\/\r\n]+[\\/]'
+            $forwardUnc = '(?<!:)(?<![A-Za-z0-9+.\-])//[^/\r\n]+/'
+            return [regex]::IsMatch($text, $driveRooted, [Text.RegularExpressions.RegexOptions]::IgnoreCase) -or [regex]::IsMatch($text, $backslashUnc, [Text.RegularExpressions.RegexOptions]::IgnoreCase) -or [regex]::IsMatch($text, $forwardUnc, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+          }
+          function Assert-PathResidueDetector {
+            foreach ($value in @('C:\secret\helper.pdb', 'D:/secret/helper.pdb', '"E:\folder\file.obj"', '\\server\share\helper.pdb', '//server/share/helper.pdb')) { if (-not (Test-AbsolutePathResidue $value)) { throw 'PATH_RESIDUE_DETECTOR_SELF_TEST_FAILED' } }
+            foreach ($value in @('https://example.com/path', 'http://example.com/path', 'ftp://example.com/path', '8664 machine (x64)', 'Guard Flags: 500', 'KERNEL32.dll', '<RUNNER_TEMP>\build\helper.pdb', '<VISUAL_STUDIO>/VC/Tools/dumpbin.exe')) { if (Test-AbsolutePathResidue $value) { throw 'PATH_RESIDUE_DETECTOR_SELF_TEST_FAILED' } }
+          }
+          Assert-PathResidueDetector
           $powershellSha256 = (Get-FileHash -LiteralPath $helper.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($powershellSha256 -notmatch '^[a-f0-9]{64}$') { throw 'POWERSHELL_SHA256_INVALID' }
-          $normalizerJson = & node scripts/normalize-windows-logon-session-helper-pe-evidence.mjs --helper $helper.FullName --headers (Join-Path $evidence 'headers.txt') --dependents (Join-Path $evidence 'dependents.txt') --imports (Join-Path $evidence 'imports.txt') --loadconfig (Join-Path $evidence 'loadconfig.txt') --source-commit '${{ github.sha }}' --expected-powershell-sha256 $powershellSha256
-          if ($LASTEXITCODE -ne 0) { throw 'normalizer failed' }
-          $normalizerLines = @($normalizerJson | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-          if ($normalizerLines.Count -ne 1) { throw 'NORMALIZER_OUTPUT_INVALID' }
-          try { $normalized = $normalizerLines[0] | ConvertFrom-Json -ErrorAction Stop } catch { throw 'NORMALIZER_OUTPUT_INVALID' }
-          if ($normalized.status -ne 'passed' -or $normalized.phase -ne 'c2a-pe-dependency-evidence' -or $normalized.sourceCommit -ne '${{ github.sha }}' -or $normalized.helperBasename -ne 'windows-logon-session-snapshot-helper.exe' -or $normalized.helperSha256 -ne $powershellSha256 -or $normalized.helperSizeBytes -ne $helperSize) { throw 'NORMALIZER_IDENTITY_INVALID' }
-          if ($normalized.machine -ne 'AMD64' -or $normalized.peFormat -ne 'PE32+' -or $normalized.imageKind -ne 'executable' -or $normalized.dynamicBase -isnot [bool] -or $normalized.dynamicBase -ne $true -or $normalized.nxCompat -isnot [bool] -or $normalized.nxCompat -ne $true -or $normalized.guardCf -isnot [bool] -or $normalized.guardCf -ne $true) { throw 'NORMALIZER_PE_INVALID' }
-          if ($normalized.directDependencies -isnot [System.Array] -or $normalized.directDependencies.Count -eq 0 -or $normalized.importLibraries -isnot [System.Array] -or $normalized.importLibraries.Count -eq 0 -or $normalized.delayLoadLibraries -isnot [System.Array] -or $normalized.dependencyPolicy -ne 'evidence-only' -or $normalized.allowlistApplied -isnot [bool] -or $normalized.allowlistApplied -ne $false) { throw 'NORMALIZER_DEPENDENCY_INVALID' }
           function Replace-LiteralPathInsensitive([string]$text, [string]$needle, [string]$replacement) {
             if ([string]::IsNullOrWhiteSpace($needle)) { return $text }
             return [regex]::Replace($text, [regex]::Escape($needle), $replacement, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
           }
           function Protect-DumpbinEvidence([string]$name, [string]$path, [string]$residueCode) {
-            $text = [IO.File]::ReadAllText($path)
-            $userProfile = if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) { $null } else { (Resolve-Path -LiteralPath $env:USERPROFILE).Path }
+            try { $text = [IO.File]::ReadAllText($path) } catch { throw $residueCode }
             $replacements = @(
               @{ needle = $helper.FullName; replacement = 'windows-logon-session-snapshot-helper.exe' },
               @{ needle = $build; replacement = '<RUNNER_TEMP>' },
@@ -158,44 +169,114 @@ jobs:
             )
             foreach ($entry in $replacements) { $text = Replace-LiteralPathInsensitive $text $entry.needle $entry.replacement }
             foreach ($entry in $replacements) { if (-not [string]::IsNullOrWhiteSpace($entry.needle) -and $text.IndexOf($entry.needle, [StringComparison]::OrdinalIgnoreCase) -ge 0) { throw $residueCode } }
-            if ($text -match '(?i)(?:[A-Z]:[\\/]|\\\\[^\\/\r\n]+[\\/])') { throw $residueCode }
+            if (Test-AbsolutePathResidue $text) { throw $residueCode }
             return $text
           }
-          $protectedEvidence = @{
-            HEADERS = Protect-DumpbinEvidence 'HEADERS' (Join-Path $evidence 'headers.txt') 'HEADERS_PATH_RESIDUE'
-            DEPENDENTS = Protect-DumpbinEvidence 'DEPENDENTS' (Join-Path $evidence 'dependents.txt') 'DEPENDENTS_PATH_RESIDUE'
-            IMPORTS = Protect-DumpbinEvidence 'IMPORTS' (Join-Path $evidence 'imports.txt') 'IMPORTS_PATH_RESIDUE'
-            LOADCONFIG = Protect-DumpbinEvidence 'LOADCONFIG' (Join-Path $evidence 'loadconfig.txt') 'LOADCONFIG_PATH_RESIDUE'
+          $dumpbinExitCodes = @{ HEADERS = 'DUMPBIN_HEADERS_FAILED'; DEPENDENTS = 'DUMPBIN_DEPENDENTS_FAILED'; IMPORTS = 'DUMPBIN_IMPORTS_FAILED'; LOADCONFIG = 'DUMPBIN_LOADCONFIG_FAILED' }
+          $dumpbinStderrCodes = @{ HEADERS = 'DUMPBIN_HEADERS_STDERR_NONEMPTY'; DEPENDENTS = 'DUMPBIN_DEPENDENTS_STDERR_NONEMPTY'; IMPORTS = 'DUMPBIN_IMPORTS_STDERR_NONEMPTY'; LOADCONFIG = 'DUMPBIN_LOADCONFIG_STDERR_NONEMPTY' }
+          $dumpbinResidueCodes = @{ HEADERS = 'HEADERS_PATH_RESIDUE'; DEPENDENTS = 'DEPENDENTS_PATH_RESIDUE'; IMPORTS = 'IMPORTS_PATH_RESIDUE'; LOADCONFIG = 'LOADCONFIG_PATH_RESIDUE' }
+          $protectedStdout = @{}; $protectedStderr = @{}
+          foreach ($result in $dumpbinResults) {
+            foreach ($path in @($result.StdoutPath, $result.StderrPath)) {
+              try { $item = Get-Item -LiteralPath $path -ErrorAction Stop } catch { throw $dumpbinResidueCodes[$result.Name.ToUpperInvariant()] }
+              if ($item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw $dumpbinResidueCodes[$result.Name.ToUpperInvariant()] }
+            }
+            $key = $result.Name.ToUpperInvariant()
+            $protectedStdout[$key] = Protect-DumpbinEvidence $key $result.StdoutPath $dumpbinResidueCodes[$key]
+            $protectedStderr[$key] = Protect-DumpbinEvidence $key $result.StderrPath $dumpbinResidueCodes[$key]
           }
+          foreach ($result in $dumpbinResults) { $key = $result.Name.ToUpperInvariant(); if ($result.ExitCode -ne 0) { throw $dumpbinExitCodes[$key] }; if ($protectedStderr[$key].Length -ne 0) { throw $dumpbinStderrCodes[$key] }; if ($protectedStdout[$key].Length -eq 0) { throw $dumpbinExitCodes[$key] } }
           function Write-RedactedEvidence([string]$name, [string]$text) {
             Write-Output "=== BEGIN DUMPBIN $name ==="
             Write-Output $text
             Write-Output "=== END DUMPBIN $name ==="
           }
-          Write-RedactedEvidence 'HEADERS' $protectedEvidence.HEADERS
-          Write-RedactedEvidence 'DEPENDENTS' $protectedEvidence.DEPENDENTS
-          Write-RedactedEvidence 'IMPORTS' $protectedEvidence.IMPORTS
-          Write-RedactedEvidence 'LOADCONFIG' $protectedEvidence.LOADCONFIG
+          Write-RedactedEvidence 'HEADERS' $protectedStdout.HEADERS
+          Write-RedactedEvidence 'DEPENDENTS' $protectedStdout.DEPENDENTS
+          Write-RedactedEvidence 'IMPORTS' $protectedStdout.IMPORTS
+          Write-RedactedEvidence 'LOADCONFIG' $protectedStdout.LOADCONFIG
+          $normalizerJson = & node scripts/normalize-windows-logon-session-helper-pe-evidence.mjs --helper $helper.FullName --headers (Join-Path $evidence 'headers.stdout.txt') --dependents (Join-Path $evidence 'dependents.stdout.txt') --imports (Join-Path $evidence 'imports.stdout.txt') --loadconfig (Join-Path $evidence 'loadconfig.stdout.txt') --source-commit '${{ github.sha }}' --expected-powershell-sha256 $powershellSha256
+          if ($LASTEXITCODE -ne 0) { throw 'NORMALIZED_JSON_INVALID' }
+          $normalizerLines = @($normalizerJson | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+          if ($normalizerLines.Count -ne 1) { throw 'NORMALIZED_JSON_INVALID' }
+          $document = $null
+          try {
+            try { $document = [System.Text.Json.JsonDocument]::Parse($normalizerLines[0]) } catch { throw 'NORMALIZED_JSON_INVALID' }
+            $jsonRoot = $document.RootElement
+            if ($jsonRoot.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) { throw 'NORMALIZED_JSON_SCHEMA_INVALID' }
+            function Get-RequiredJsonElement([System.Text.Json.JsonElement]$object, [string]$name) {
+              [System.Text.Json.JsonElement]$element = [System.Text.Json.JsonElement]::new()
+              if (-not $object.TryGetProperty($name, [ref]$element)) { throw 'NORMALIZED_JSON_SCHEMA_INVALID' }
+              return $element
+            }
+            function Get-ExactJsonString([System.Text.Json.JsonElement]$object, [string]$name, [string]$expected, [string]$failureCode) {
+              $element = Get-RequiredJsonElement $object $name
+              if ($element.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or $element.GetString() -cne $expected) { throw $failureCode }
+              return $element.GetString()
+            }
+            function Get-ExactJsonBoolean([System.Text.Json.JsonElement]$object, [string]$name, [bool]$expected, [string]$failureCode) {
+              $element = Get-RequiredJsonElement $object $name
+              $expectedKind = if ($expected) { [System.Text.Json.JsonValueKind]::True } else { [System.Text.Json.JsonValueKind]::False }
+              if ($element.ValueKind -ne $expectedKind) { throw $failureCode }
+              return $expected
+            }
+            function Get-JsonDllArray([System.Text.Json.JsonElement]$object, [string]$name, [bool]$nonEmpty) {
+              $element = Get-RequiredJsonElement $object $name
+              if ($element.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) { throw 'NORMALIZED_DEPENDENCIES_INVALID' }
+              $values = [System.Collections.Generic.List[string]]::new(); $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal); $previous = $null
+              foreach ($item in $element.EnumerateArray()) {
+                if ($item.ValueKind -ne [System.Text.Json.JsonValueKind]::String) { throw 'NORMALIZED_DEPENDENCIES_INVALID' }
+                $value = $item.GetString()
+                if ($value -cnotmatch '^[a-z0-9._-]+\.dll$' -or -not $seen.Add($value) -or ($null -ne $previous -and [System.StringComparer]::Ordinal.Compare($previous, $value) -ge 0)) { throw 'NORMALIZED_DEPENDENCIES_INVALID' }
+                $values.Add($value); $previous = $value
+              }
+              if ($nonEmpty -and $values.Count -eq 0) { throw 'NORMALIZED_DEPENDENCIES_INVALID' }
+              return $values.ToArray()
+            }
+            $status = Get-ExactJsonString $jsonRoot 'status' 'passed' 'NORMALIZED_IDENTITY_INVALID'
+            $phase = Get-ExactJsonString $jsonRoot 'phase' 'c2a-pe-dependency-evidence' 'NORMALIZED_IDENTITY_INVALID'
+            $sourceCommit = Get-ExactJsonString $jsonRoot 'sourceCommit' '${{ github.sha }}' 'NORMALIZED_IDENTITY_INVALID'
+            $helperBasename = Get-ExactJsonString $jsonRoot 'helperBasename' 'windows-logon-session-snapshot-helper.exe' 'NORMALIZED_HELPER_INVALID'
+            $helperSha256 = Get-ExactJsonString $jsonRoot 'helperSha256' $powershellSha256 'NORMALIZED_HELPER_INVALID'
+            $machine = Get-ExactJsonString $jsonRoot 'machine' 'AMD64' 'NORMALIZED_PE_INVALID'
+            $peFormat = Get-ExactJsonString $jsonRoot 'peFormat' 'PE32+' 'NORMALIZED_PE_INVALID'
+            $imageKind = Get-ExactJsonString $jsonRoot 'imageKind' 'executable' 'NORMALIZED_PE_INVALID'
+            if ($sourceCommit -cnotmatch '^[a-f0-9]{40}$' -or $helperSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'NORMALIZED_IDENTITY_INVALID' }
+            $sizeElement = Get-RequiredJsonElement $jsonRoot 'helperSizeBytes'; [Int64]$helperSizeBytes = 0
+            if ($sizeElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Number -or -not $sizeElement.TryGetInt64([ref]$helperSizeBytes) -or $helperSizeBytes -le 0 -or $helperSizeBytes -gt (16 * 1024 * 1024) -or $helperSizeBytes -ne [Int64]$helperSize) { throw 'NORMALIZED_HELPER_INVALID' }
+            $dynamicBase = Get-ExactJsonBoolean $jsonRoot 'dynamicBase' $true 'NORMALIZED_MITIGATION_INVALID'
+            $nxCompat = Get-ExactJsonBoolean $jsonRoot 'nxCompat' $true 'NORMALIZED_MITIGATION_INVALID'
+            $guardCf = Get-ExactJsonBoolean $jsonRoot 'guardCf' $true 'NORMALIZED_MITIGATION_INVALID'
+            $allowlistApplied = Get-ExactJsonBoolean $jsonRoot 'allowlistApplied' $false 'NORMALIZED_POLICY_INVALID'
+            $directDependencies = Get-JsonDllArray $jsonRoot 'directDependencies' $true
+            $importLibraries = Get-JsonDllArray $jsonRoot 'importLibraries' $true
+            $delayLoadLibraries = Get-JsonDllArray $jsonRoot 'delayLoadLibraries' $false
+            $dependencyPolicy = Get-ExactJsonString $jsonRoot 'dependencyPolicy' 'evidence-only' 'NORMALIZED_POLICY_INVALID'
+            $subsystemElement = Get-RequiredJsonElement $jsonRoot 'subsystem'
+            if ($subsystemElement.ValueKind -ne [System.Text.Json.JsonValueKind]::String) { throw 'NORMALIZED_JSON_SCHEMA_INVALID' }
+            $subsystem = $subsystemElement.GetString()
+            if ($subsystem -cnotmatch '^[A-Z0-9_]{1,64}$') { throw 'NORMALIZED_JSON_SCHEMA_INVALID' }
+          } finally { if ($null -ne $document) { $document.Dispose() } }
           Write-Output "4A3_SOURCE_COMMIT=${{ github.sha }}"
-          Write-Output "4A3_HELPER_BASENAME=$($normalized.helperBasename)"
-          Write-Output "4A3_HELPER_SIZE_BYTES=$($normalized.helperSizeBytes)"
-          Write-Output "4A3_HELPER_SHA256=$($normalized.helperSha256)"
+          Write-Output "4A3_HELPER_BASENAME=$helperBasename"
+          Write-Output "4A3_HELPER_SIZE_BYTES=$helperSizeBytes"
+          Write-Output "4A3_HELPER_SHA256=$helperSha256"
           $summary = @(
             '## C2-A PE and dependency evidence',
-            "- Source commit: $($normalized.sourceCommit)",
-            "- Helper basename: $($normalized.helperBasename)",
-            "- Helper SHA-256: $($normalized.helperSha256)",
-            "- Helper size bytes: $($normalized.helperSizeBytes)",
-            "- Machine: $($normalized.machine)",
-            "- PE format: $($normalized.peFormat)",
-            "- Image kind: $($normalized.imageKind)",
-            "- Subsystem: $($normalized.subsystem)",
-            "- DYNAMICBASE: $($normalized.dynamicBase)",
-            "- NXCOMPAT: $($normalized.nxCompat)",
-            "- Guard CF: $($normalized.guardCf)",
-            "- Direct dependencies: $($normalized.directDependencies -join ', ')",
-            "- Import libraries: $($normalized.importLibraries -join ', ')",
-            "- Delay-load libraries: $($normalized.delayLoadLibraries -join ', ')",
+            "- Source commit: $sourceCommit",
+            "- Helper basename: $helperBasename",
+            "- Helper SHA-256: $helperSha256",
+            "- Helper size bytes: $helperSizeBytes",
+            "- Machine: $machine",
+            "- PE format: $peFormat",
+            "- Image kind: $imageKind",
+            "- Subsystem: $subsystem",
+            "- DYNAMICBASE: $dynamicBase",
+            "- NXCOMPAT: $nxCompat",
+            "- Guard CF: $guardCf",
+            "- Direct dependencies: $($directDependencies -join ', ')",
+            "- Import libraries: $($importLibraries -join ', ')",
+            "- Delay-load libraries: $($delayLoadLibraries -join ', ')",
             '- Dependency policy: evidence-only; no DLL allowlist applied.',
             '- Helper execution: not performed.',
             '- Artifact upload: not performed.',

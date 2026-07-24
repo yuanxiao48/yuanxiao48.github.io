@@ -6,13 +6,15 @@ const required = [
 	"name: Verify Windows Helper PE Evidence", "verify/4a3-real-helper-bff3f755", "contents: read", "runs-on: windows-2022", "timeout-minutes: 15",
 	"actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2", "persist-credentials: false", "fetch-depth: 1", "Visual Studio 17 2022", "-A x64", "--config Release",
 	"--target windows_logon_session_protocol", "--target windows-logon-session-snapshot-protocol-test", "--target windows-logon-session-snapshot-helper", "windows-logon-session-snapshot-protocol-test.exe", "windows-logon-session-snapshot-helper.exe",
-	"/headers", "/dependents", "/imports", "/loadconfig", "vswhere.exe", "VsDevCmd.bat", "-arch=x64", "-host_arch=x64", "Get-FileHash", "-Algorithm SHA256", "Replace-LiteralPathInsensitive", "Protect-DumpbinEvidence", "<RUNNER_TEMP>", "<GITHUB_WORKSPACE>", "<VISUAL_STUDIO>", "<USERPROFILE>",
-	"scripts/normalize-windows-logon-session-helper-pe-evidence.mjs", "expected-powershell-sha256", "node scripts/test-windows-logon-session-helper-pe-evidence.mjs", "node scripts/test-windows-logon-session-helper-pe-evidence-workflow-source-contract.mjs",
-	"node scripts/test-windows-logon-session-helper-source-contract.mjs", "node scripts/test-windows-logon-session-real-validator.mjs", "node scripts/test-windows-logon-session-real-validator-source-contract.mjs", "node scripts/test-windows-logon-session-snapshot-protocol.mjs", "node scripts/test-windows-logon-session-snapshot-runner.mjs", "node scripts/test-windows-logon-session-liveness-provider.mjs", "node scripts/test-host-execution-containment-comparison.mjs", "node scripts/test-windows-logon-session-liveness-evidence.mjs",
+	"/headers", "/dependents", "/imports", "/loadconfig", "vswhere.exe", "VsDevCmd.bat", "-arch=x64", "-host_arch=x64", "Get-FileHash", "-Algorithm SHA256", "Replace-LiteralPathInsensitive", "Protect-DumpbinEvidence", "Test-AbsolutePathResidue", "Assert-PathResidueDetector", "PATH_RESIDUE_DETECTOR_SELF_TEST_FAILED", "<RUNNER_TEMP>", "<GITHUB_WORKSPACE>", "<VISUAL_STUDIO>", "<USERPROFILE>",
+	"scripts/normalize-windows-logon-session-helper-pe-evidence.mjs", "expected-powershell-sha256", "System.Text.Json.JsonDocument", "System.Text.Json.JsonValueKind", "TryGetInt64", "Get-RequiredJsonElement", "Get-ExactJsonString", "Get-ExactJsonBoolean", "Get-JsonDllArray", "JsonDocument", ".Dispose()",
+	"NORMALIZED_JSON_INVALID", "NORMALIZED_JSON_SCHEMA_INVALID", "NORMALIZED_IDENTITY_INVALID", "NORMALIZED_HELPER_INVALID", "NORMALIZED_PE_INVALID", "NORMALIZED_MITIGATION_INVALID", "NORMALIZED_DEPENDENCIES_INVALID", "NORMALIZED_POLICY_INVALID",
+	"DUMPBIN_HEADERS_FAILED", "DUMPBIN_DEPENDENTS_FAILED", "DUMPBIN_IMPORTS_FAILED", "DUMPBIN_LOADCONFIG_FAILED", "DUMPBIN_HEADERS_STDERR_NONEMPTY", "DUMPBIN_DEPENDENTS_STDERR_NONEMPTY", "DUMPBIN_IMPORTS_STDERR_NONEMPTY", "DUMPBIN_LOADCONFIG_STDERR_NONEMPTY",
+	"node scripts/test-windows-logon-session-helper-pe-evidence.mjs", "node scripts/test-windows-logon-session-helper-pe-evidence-workflow-source-contract.mjs", "node scripts/test-windows-logon-session-helper-source-contract.mjs", "node scripts/test-windows-logon-session-real-validator.mjs", "node scripts/test-windows-logon-session-real-validator-source-contract.mjs", "node scripts/test-windows-logon-session-snapshot-protocol.mjs", "node scripts/test-windows-logon-session-snapshot-runner.mjs", "node scripts/test-windows-logon-session-liveness-provider.mjs", "node scripts/test-host-execution-containment-comparison.mjs", "node scripts/test-windows-logon-session-liveness-evidence.mjs",
 	"github.repository", "github.ref", "github.sha", "github.event_name", "runner.os", "runner.arch", "studio-4a3-c2a-build", "studio-4a3-c2a-evidence",
 ];
 for (const text of required) assert.equal(workflow.includes(text), true, text);
-for (const forbidden of ["workflow_dispatch", "pull_request", "schedule:", "repository_dispatch", "workflow_call", "tags:", "actions/upload-artifact", "actions/download-artifact", "actions/cache", "upload-artifact", "download-artifact", "cache@", "container:", "self-hosted", "matrix:", "services:", "environment:", "secrets.", "GITHUB_TOKEN", "npm ", "npm\n", "CMAKE_MSVC_RUNTIME_LIBRARY", "/MT", "/MD", "Start-Process", "Invoke-Expression", "ScriptBlock::Create", "& $helper.FullName", "process.exit", "always()", "node scripts/validate-windows-logon-session-helper-real.mjs", "windows-logon-session-snapshot-helper.exe --"]) assert.equal(workflow.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
+for (const forbidden of ["workflow_dispatch", "pull_request", "schedule:", "repository_dispatch", "workflow_call", "tags:", "actions/upload-artifact", "actions/download-artifact", "actions/cache", "upload-artifact", "download-artifact", "cache@", "container:", "self-hosted", "matrix:", "services:", "environment:", "secrets.", "GITHUB_TOKEN", "npm ", "npm\n", "CMAKE_MSVC_RUNTIME_LIBRARY", "/MT", "/MD", "Start-Process", "Invoke-Expression", "ScriptBlock::Create", "ConvertFrom-Json", "2>&1", "& $helper.FullName", "process.exit", "always()", "node scripts/validate-windows-logon-session-helper-real.mjs", "windows-logon-session-snapshot-helper.exe --"]) assert.equal(workflow.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
 assert.match(workflow, /on:\s*\n\s+push:\s*\n\s+branches:\s*\n\s+- verify\/4a3-real-helper-bff3f755/);
 assert.match(workflow, /permissions:\s*\n\s+contents: read/);
 assert.equal((workflow.match(/uses:\s*actions\/checkout@/g) || []).length, 1);
@@ -25,22 +27,35 @@ for (const [command, code] of [
 	["& cmake --build $build --config Release --target windows-logon-session-snapshot-helper", "CMAKE_HELPER_BUILD_FAILED"],
 ]) assert.match(workflow, new RegExp(`${command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\n\\s*if \\(\\$LASTEXITCODE -ne 0\\) \\{ throw '${code}' \\}`));
 assert.equal((workflow.match(/Remove-Item -LiteralPath \$directory -Recurse -Force/g) || []).length, 1);
-assert.match(workflow, /\$env:RUNNER_TEMP/);
 assert.match(workflow, /Resolve-Path -LiteralPath \$helpers\[0\]\.FullName/);
 assert.match(workflow, /& \$protocolTest\.FullName/);
-assert.match(workflow, /if \(\$LASTEXITCODE -ne 0\) \{ throw/);
-assert.match(workflow, /\$normalized\.helperSha256 -ne \$powershellSha256/);
-for (const field of ["status", "phase", "sourceCommit", "helperBasename", "helperSha256", "helperSizeBytes", "machine", "peFormat", "imageKind", "dynamicBase", "nxCompat", "guardCf", "directDependencies", "importLibraries", "delayLoadLibraries", "dependencyPolicy", "allowlistApplied"]) assert.equal(workflow.includes(`$normalized.${field}`), true, field);
+for (const [switchValue, name] of [["headers", "headers"], ["dependents", "dependents"], ["imports", "imports"], ["loadconfig", "loadconfig"]]) assert.equal(workflow.includes(`Invoke-DumpbinEvidence '/${switchValue}' '${name}'`), true, name);
+assert.match(workflow, /& \$dumpbin \$switch \$helper\.FullName 1> \$stdoutPath 2> \$stderrPath\s*\n\s*\$exitCode = \$LASTEXITCODE/);
+assert.match(workflow, /\$protectedStdout\[\$key\] = Protect-DumpbinEvidence/);
+assert.match(workflow, /\$protectedStderr\[\$key\] = Protect-DumpbinEvidence/);
 for (const code of ["HEADERS_PATH_RESIDUE", "DEPENDENTS_PATH_RESIDUE", "IMPORTS_PATH_RESIDUE", "LOADCONFIG_PATH_RESIDUE"]) assert.equal(workflow.includes(code), true, code);
-assert.match(workflow, /\(\?i\)\(\?:\[A-Z\]:\[\\\\\/\]\|\\\\\\\\/);
+for (const text of ["C:\\secret\\helper.pdb", "D:/secret/helper.pdb", "\"E:\\folder\\file.obj\"", "\\\\server\\share\\helper.pdb", "//server/share/helper.pdb", "https://example.com/path", "http://example.com/path", "ftp://example.com/path", "8664 machine (x64)", "Guard Flags: 500"]) assert.equal(workflow.includes(text), true, text);
+assert.match(workflow, /\(\?<!\[A-Za-z0-9\+\.\\-\]\)\[A-Za-z\]:\[\\\\\/\]/);
+assert.match(workflow, /\(\?<!:\)\(\?<!\[A-Za-z0-9\+\.\\-\]\)\/\/\[\^\/\\r\\n\]\+\//);
 assert.match(workflow, /\[regex\]::Escape\(\$needle\)/);
 assert.match(workflow, /\$normalizerLines\.Count -ne 1/);
-assert.match(workflow, /Protect-DumpbinEvidence 'HEADERS'/);
-assert.match(workflow, /Write-Output "=== BEGIN DUMPBIN \$name ==="/);
-assert.match(workflow, /Write-Output "=== END DUMPBIN \$name ==="/);
+assert.match(workflow, /\$jsonRoot\.ValueKind -ne \[System\.Text\.Json\.JsonValueKind\]::Object/);
+assert.match(workflow, /\$sizeElement\.ValueKind -ne \[System\.Text\.Json\.JsonValueKind\]::Number/);
+assert.match(workflow, /\$element\.ValueKind -ne \[System\.Text\.Json\.JsonValueKind\]::Array/);
+assert.match(workflow, /\$item\.ValueKind -ne \[System\.Text\.Json\.JsonValueKind\]::String/);
+assert.match(workflow, /\$document\.Dispose\(\)/);
+assert.match(workflow, /Get-ExactJsonBoolean \$jsonRoot 'allowlistApplied' \$false 'NORMALIZED_POLICY_INVALID'/);
+assert.match(workflow, /Get-JsonDllArray \$jsonRoot 'directDependencies' \$true/);
+assert.match(workflow, /Get-JsonDllArray \$jsonRoot 'importLibraries' \$true/);
+assert.match(workflow, /Get-JsonDllArray \$jsonRoot 'delayLoadLibraries' \$false/);
+assert.equal(workflow.includes("$normalized."), false);
 assert.equal(workflow.includes("Get-Content"), false);
 assert.equal(workflow.includes("Write-Host"), false);
-assert.equal(workflow.indexOf("$protectedEvidence = @{") < workflow.indexOf("Write-RedactedEvidence 'HEADERS'"), true);
+assert.equal(workflow.lastIndexOf("Assert-PathResidueDetector") < workflow.indexOf("$protectedStdout = @{}"), true);
+assert.equal(workflow.indexOf("$protectedStdout = @{}") < workflow.indexOf("Write-RedactedEvidence 'HEADERS'"), true);
+assert.equal(workflow.indexOf("$normalizerJson =") > workflow.indexOf("$protectedStderr = @{}"), true);
+assert.equal(workflow.indexOf("$normalizerJson =") > workflow.indexOf("if ($result.ExitCode -ne 0)"), true);
+assert.equal(workflow.indexOf("$summary = @(") > workflow.indexOf("$subsystem ="), true);
 for (const name of ["HEADERS", "DEPENDENTS", "IMPORTS", "LOADCONFIG"]) assert.match(workflow, new RegExp(`Write-RedactedEvidence '${name}'`));
 assert.equal(workflow.includes("$env:GITHUB_STEP_SUMMARY"), true);
 console.log("windows logon-session helper PE evidence workflow source-contract tests passed");

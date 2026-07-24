@@ -50,6 +50,11 @@ function loadconfigGuardFlags(loadconfig) {
 	const lines = loadconfig.split(/\r?\n/);
 	for (let index = 0; index < lines.length; index += 1) {
 		if (!/^\s*Guard\s+Flags\b/i.test(lines[index])) continue;
+		const value = lines[index].match(/^\s*Guard\s+Flags\s*:?\s*((?:0[xX])?[0-9a-fA-F]+)\s*$/i);
+		if (!value) return freeze({ found: true, valueValid: false, valueNonZero: false, cfInstrumented: false, fidTablePresent: false });
+		const hexadecimal = value[1].replace(/^0x/i, "");
+		const valueNonZero = /[1-9a-f]/i.test(hexadecimal);
+		if (!valueNonZero) return freeze({ found: true, valueValid: true, valueNonZero: false, cfInstrumented: false, fidTablePresent: false });
 		const block = [lines[index]];
 		for (let offset = 1; offset <= 16 && index + offset < lines.length; offset += 1) {
 			const line = lines[index + offset];
@@ -57,9 +62,9 @@ function loadconfigGuardFlags(loadconfig) {
 			block.push(line);
 		}
 		const text = block.join("\n");
-		return freeze({ found: true, cfInstrumented: /\bCF\s+Instrumented\b/i.test(text), fidTablePresent: /\bFID\s+table\s+present\b/i.test(text) });
+		return freeze({ found: true, valueValid: true, valueNonZero: true, cfInstrumented: /\bCF\s+Instrumented\b/i.test(text), fidTablePresent: /\bFID\s+table\s+present\b/i.test(text) });
 	}
-	return freeze({ found: false, cfInstrumented: false, fidTablePresent: false });
+	return freeze({ found: false, valueValid: false, valueNonZero: false, cfInstrumented: false, fidTablePresent: false });
 }
 
 function parseImports(imports) {
@@ -80,7 +85,7 @@ function parseHeaders(headers, loadconfig) {
 	const dynamicBase = /\bdynamic\s+base\b/i.test(headers);
 	const nxCompat = /\bnx\s+compatible\b/i.test(headers);
 	const flags = loadconfigGuardFlags(loadconfig);
-	const guardCf = hasHeaderCharacteristic(headers, "Guard\\s+CF") && flags.found && flags.cfInstrumented && flags.fidTablePresent;
+	const guardCf = hasHeaderCharacteristic(headers, "Guard\\s+CF") && flags.found && flags.valueValid && flags.valueNonZero && flags.cfInstrumented && flags.fidTablePresent;
 	if (!dynamicBase || !nxCompat || !guardCf) return failure(WINDOWS_LOGON_SESSION_PE_EVIDENCE_CODES.mitigationMissing);
 	return freeze({ status: "passed", machine: "AMD64", peFormat: "PE32+", imageKind: "executable", subsystem, dynamicBase, nxCompat, guardCf });
 }
