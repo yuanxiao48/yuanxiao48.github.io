@@ -121,6 +121,10 @@ jobs:
           $dumpbin = (Resolve-Path -LiteralPath $dumpbin).Path
           $dumpbinItem = Get-Item -LiteralPath $dumpbin
           if (-not $dumpbin.StartsWith($vsRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or (($dumpbinItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or $dumpbinItem.PSIsContainer) { throw 'dumpbin origin invalid' }
+          $maxDumpbinStdoutBytes = 8MB
+          $maxDumpbinStderrBytes = 1MB
+          $maxNormalizerStdoutBytes = 256KB
+          $maxNormalizerStderrBytes = 1MB
           function Invoke-DumpbinEvidence([string]$switch, [string]$name) {
             $stdoutPath = Join-Path $evidence ($name + '.stdout.txt')
             $stderrPath = Join-Path $evidence ($name + '.stderr.txt')
@@ -156,8 +160,43 @@ jobs:
             if ([string]::IsNullOrWhiteSpace($needle)) { return $text }
             return [regex]::Replace($text, [regex]::Escape($needle), $replacement, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
           }
-          function Protect-DumpbinEvidence([string]$name, [string]$path, [string]$residueCode) {
-            try { $text = [IO.File]::ReadAllText($path) } catch { throw $residueCode }
+          function Get-VerifiedToolOutputFile([string]$path, [bool]$allowEmpty, [Int64]$maximumBytes, [string]$invalidCode, [string]$tooLargeCode) {
+            try {
+              $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+              if ($item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or $item.Length -lt 0) { throw $invalidCode }
+              $canonicalPath = (Resolve-Path -LiteralPath $item.FullName -ErrorAction Stop).Path
+              if (-not $canonicalPath.StartsWith($evidence + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw $invalidCode }
+              if ($item.Length -gt $maximumBytes) { throw $tooLargeCode }
+              if (-not $allowEmpty -and $item.Length -eq 0) { throw $invalidCode }
+              return $canonicalPath
+            } catch {
+              if ($_.Exception.Message -eq $invalidCode -or $_.Exception.Message -eq $tooLargeCode) { throw $_.Exception.Message }
+              throw $invalidCode
+            }
+          }
+          function Read-BoundedToolOutput([string]$path, [bool]$allowEmpty, [Int64]$maximumBytes, [string]$invalidCode, [string]$tooLargeCode, [string]$readCode) {
+            $canonicalPath = Get-VerifiedToolOutputFile $path $allowEmpty $maximumBytes $invalidCode $tooLargeCode
+            $stream = $null; $memory = $null
+            try {
+              $stream = [IO.FileStream]::new($canonicalPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+              $memory = [IO.MemoryStream]::new()
+              $buffer = [byte[]]::new(65536)
+              while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                if (($memory.Length + [Int64]$read) -gt $maximumBytes) { throw $tooLargeCode }
+                $memory.Write($buffer, 0, $read)
+              }
+              $bytes = $memory.ToArray()
+              if (-not $allowEmpty -and $bytes.Length -eq 0) { throw $invalidCode }
+              try { return [Text.UTF8Encoding]::new($false, $true).GetString($bytes) } catch { throw $readCode }
+            } catch {
+              if ($_.Exception.Message -eq $invalidCode -or $_.Exception.Message -eq $tooLargeCode -or $_.Exception.Message -eq $readCode) { throw $_.Exception.Message }
+              throw $readCode
+            } finally {
+              if ($null -ne $memory) { $memory.Dispose() }
+              if ($null -ne $stream) { $stream.Dispose() }
+            }
+          }
+          function Protect-ToolOutput([string]$text, [string]$residueCode) {
             $replacements = @(
               @{ needle = $helper.FullName; replacement = 'windows-logon-session-snapshot-helper.exe' },
               @{ needle = $build; replacement = '<RUNNER_TEMP>' },
@@ -172,20 +211,21 @@ jobs:
             if (Test-AbsolutePathResidue $text) { throw $residueCode }
             return $text
           }
-          $dumpbinExitCodes = @{ HEADERS = 'DUMPBIN_HEADERS_FAILED'; DEPENDENTS = 'DUMPBIN_DEPENDENTS_FAILED'; IMPORTS = 'DUMPBIN_IMPORTS_FAILED'; LOADCONFIG = 'DUMPBIN_LOADCONFIG_FAILED' }
-          $dumpbinStderrCodes = @{ HEADERS = 'DUMPBIN_HEADERS_STDERR_NONEMPTY'; DEPENDENTS = 'DUMPBIN_DEPENDENTS_STDERR_NONEMPTY'; IMPORTS = 'DUMPBIN_IMPORTS_STDERR_NONEMPTY'; LOADCONFIG = 'DUMPBIN_LOADCONFIG_STDERR_NONEMPTY' }
+          $dumpbinOutputCodes = @{
+            HEADERS = @{ Exit = 'DUMPBIN_HEADERS_FAILED'; StdoutInvalid = 'HEADERS_STDOUT_INVALID'; StdoutTooLarge = 'HEADERS_STDOUT_TOO_LARGE'; StdoutRead = 'HEADERS_STDOUT_READ_FAILED'; StderrInvalid = 'HEADERS_STDERR_INVALID'; StderrTooLarge = 'HEADERS_STDERR_TOO_LARGE'; StderrRead = 'HEADERS_STDERR_READ_FAILED'; StderrNonEmpty = 'DUMPBIN_HEADERS_STDERR_NONEMPTY' }
+            DEPENDENTS = @{ Exit = 'DUMPBIN_DEPENDENTS_FAILED'; StdoutInvalid = 'DEPENDENTS_STDOUT_INVALID'; StdoutTooLarge = 'DEPENDENTS_STDOUT_TOO_LARGE'; StdoutRead = 'DEPENDENTS_STDOUT_READ_FAILED'; StderrInvalid = 'DEPENDENTS_STDERR_INVALID'; StderrTooLarge = 'DEPENDENTS_STDERR_TOO_LARGE'; StderrRead = 'DEPENDENTS_STDERR_READ_FAILED'; StderrNonEmpty = 'DUMPBIN_DEPENDENTS_STDERR_NONEMPTY' }
+            IMPORTS = @{ Exit = 'DUMPBIN_IMPORTS_FAILED'; StdoutInvalid = 'IMPORTS_STDOUT_INVALID'; StdoutTooLarge = 'IMPORTS_STDOUT_TOO_LARGE'; StdoutRead = 'IMPORTS_STDOUT_READ_FAILED'; StderrInvalid = 'IMPORTS_STDERR_INVALID'; StderrTooLarge = 'IMPORTS_STDERR_TOO_LARGE'; StderrRead = 'IMPORTS_STDERR_READ_FAILED'; StderrNonEmpty = 'DUMPBIN_IMPORTS_STDERR_NONEMPTY' }
+            LOADCONFIG = @{ Exit = 'DUMPBIN_LOADCONFIG_FAILED'; StdoutInvalid = 'LOADCONFIG_STDOUT_INVALID'; StdoutTooLarge = 'LOADCONFIG_STDOUT_TOO_LARGE'; StdoutRead = 'LOADCONFIG_STDOUT_READ_FAILED'; StderrInvalid = 'LOADCONFIG_STDERR_INVALID'; StderrTooLarge = 'LOADCONFIG_STDERR_TOO_LARGE'; StderrRead = 'LOADCONFIG_STDERR_READ_FAILED'; StderrNonEmpty = 'DUMPBIN_LOADCONFIG_STDERR_NONEMPTY' }
+          }
           $dumpbinResidueCodes = @{ HEADERS = 'HEADERS_PATH_RESIDUE'; DEPENDENTS = 'DEPENDENTS_PATH_RESIDUE'; IMPORTS = 'IMPORTS_PATH_RESIDUE'; LOADCONFIG = 'LOADCONFIG_PATH_RESIDUE' }
           $protectedStdout = @{}; $protectedStderr = @{}
           foreach ($result in $dumpbinResults) {
-            foreach ($path in @($result.StdoutPath, $result.StderrPath)) {
-              try { $item = Get-Item -LiteralPath $path -ErrorAction Stop } catch { throw $dumpbinResidueCodes[$result.Name.ToUpperInvariant()] }
-              if ($item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw $dumpbinResidueCodes[$result.Name.ToUpperInvariant()] }
-            }
             $key = $result.Name.ToUpperInvariant()
-            $protectedStdout[$key] = Protect-DumpbinEvidence $key $result.StdoutPath $dumpbinResidueCodes[$key]
-            $protectedStderr[$key] = Protect-DumpbinEvidence $key $result.StderrPath $dumpbinResidueCodes[$key]
+            $codes = $dumpbinOutputCodes[$key]
+            $protectedStdout[$key] = Protect-ToolOutput (Read-BoundedToolOutput $result.StdoutPath $false $maxDumpbinStdoutBytes $codes.StdoutInvalid $codes.StdoutTooLarge $codes.StdoutRead) $dumpbinResidueCodes[$key]
+            $protectedStderr[$key] = Protect-ToolOutput (Read-BoundedToolOutput $result.StderrPath $true $maxDumpbinStderrBytes $codes.StderrInvalid $codes.StderrTooLarge $codes.StderrRead) $dumpbinResidueCodes[$key]
           }
-          foreach ($result in $dumpbinResults) { $key = $result.Name.ToUpperInvariant(); if ($result.ExitCode -ne 0) { throw $dumpbinExitCodes[$key] }; if ($protectedStderr[$key].Length -ne 0) { throw $dumpbinStderrCodes[$key] }; if ($protectedStdout[$key].Length -eq 0) { throw $dumpbinExitCodes[$key] } }
+          foreach ($result in $dumpbinResults) { $key = $result.Name.ToUpperInvariant(); $codes = $dumpbinOutputCodes[$key]; if ($result.ExitCode -ne 0) { throw $codes.Exit }; if ($protectedStderr[$key].Length -ne 0) { throw $codes.StderrNonEmpty } }
           function Write-RedactedEvidence([string]$name, [string]$text) {
             Write-Output "=== BEGIN DUMPBIN $name ==="
             Write-Output $text
@@ -195,15 +235,34 @@ jobs:
           Write-RedactedEvidence 'DEPENDENTS' $protectedStdout.DEPENDENTS
           Write-RedactedEvidence 'IMPORTS' $protectedStdout.IMPORTS
           Write-RedactedEvidence 'LOADCONFIG' $protectedStdout.LOADCONFIG
-          $normalizerJson = & node scripts/normalize-windows-logon-session-helper-pe-evidence.mjs --helper $helper.FullName --headers (Join-Path $evidence 'headers.stdout.txt') --dependents (Join-Path $evidence 'dependents.stdout.txt') --imports (Join-Path $evidence 'imports.stdout.txt') --loadconfig (Join-Path $evidence 'loadconfig.stdout.txt') --source-commit '${{ github.sha }}' --expected-powershell-sha256 $powershellSha256
-          if ($LASTEXITCODE -ne 0) { throw 'NORMALIZED_JSON_INVALID' }
-          $normalizerLines = @($normalizerJson | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+          $normalizerStdoutPath = Join-Path $evidence 'normalizer.stdout.txt'
+          $normalizerStderrPath = Join-Path $evidence 'normalizer.stderr.txt'
+          & node scripts/normalize-windows-logon-session-helper-pe-evidence.mjs --helper $helper.FullName --headers (Join-Path $evidence 'headers.stdout.txt') --dependents (Join-Path $evidence 'dependents.stdout.txt') --imports (Join-Path $evidence 'imports.stdout.txt') --loadconfig (Join-Path $evidence 'loadconfig.stdout.txt') --source-commit '${{ github.sha }}' --expected-powershell-sha256 $powershellSha256 1> $normalizerStdoutPath 2> $normalizerStderrPath
+          $normalizerExitCode = $LASTEXITCODE
+          $normalizerStdout = Protect-ToolOutput (Read-BoundedToolOutput $normalizerStdoutPath $false $maxNormalizerStdoutBytes 'NORMALIZER_STDOUT_INVALID' 'NORMALIZER_STDOUT_TOO_LARGE' 'NORMALIZER_STDOUT_READ_FAILED') 'NORMALIZER_STDOUT_PATH_RESIDUE'
+          $normalizerStderr = Protect-ToolOutput (Read-BoundedToolOutput $normalizerStderrPath $true $maxNormalizerStderrBytes 'NORMALIZER_STDERR_INVALID' 'NORMALIZER_STDERR_TOO_LARGE' 'NORMALIZER_STDERR_READ_FAILED') 'NORMALIZER_STDERR_PATH_RESIDUE'
+          if ($normalizerStderr.Length -ne 0) { throw 'NORMALIZER_STDERR_NONEMPTY' }
+          if ($normalizerExitCode -ne 0) { throw 'NORMALIZED_JSON_INVALID' }
+          $normalizerLines = @($normalizerStdout -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
           if ($normalizerLines.Count -ne 1) { throw 'NORMALIZED_JSON_INVALID' }
-          $document = $null
-          try {
-            try { $document = [System.Text.Json.JsonDocument]::Parse($normalizerLines[0]) } catch { throw 'NORMALIZED_JSON_INVALID' }
+          function Assert-NormalizedEvidenceJson([string]$jsonText, [string]$expectedCommit, [string]$expectedSha256, [Int64]$expectedHelperSize) {
+            $document = $null
+            try {
+              try { $document = [System.Text.Json.JsonDocument]::Parse($jsonText) } catch { throw 'NORMALIZED_JSON_INVALID' }
             $jsonRoot = $document.RootElement
-            if ($jsonRoot.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) { throw 'NORMALIZED_JSON_SCHEMA_INVALID' }
+            if ($jsonRoot.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) { throw 'NORMALIZED_ROOT_SCHEMA_INVALID' }
+            $expectedProperties = [string[]]@('status', 'phase', 'sourceCommit', 'helperBasename', 'helperSha256', 'helperSizeBytes', 'machine', 'peFormat', 'imageKind', 'subsystem', 'dynamicBase', 'nxCompat', 'guardCf', 'directDependencies', 'importLibraries', 'delayLoadLibraries', 'dependencyPolicy', 'allowlistApplied')
+            $expectedPropertySet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+            $seenProperties = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+            foreach ($propertyName in $expectedProperties) { [void]$expectedPropertySet.Add($propertyName) }
+            $propertyCount = 0
+            foreach ($property in $jsonRoot.EnumerateObject()) {
+              $propertyCount += 1
+              if (-not $expectedPropertySet.Contains($property.Name)) { throw 'NORMALIZED_PROPERTY_SET_INVALID' }
+              if (-not $seenProperties.Add($property.Name)) { throw 'NORMALIZED_PROPERTY_DUPLICATE' }
+            }
+            if ($propertyCount -ne $expectedProperties.Length) { throw 'NORMALIZED_PROPERTY_SET_INVALID' }
+            foreach ($propertyName in $expectedProperties) { if (-not $seenProperties.Contains($propertyName)) { throw 'NORMALIZED_PROPERTY_MISSING' } }
             function Get-RequiredJsonElement([System.Text.Json.JsonElement]$object, [string]$name) {
               [System.Text.Json.JsonElement]$element = [System.Text.Json.JsonElement]::new()
               if (-not $object.TryGetProperty($name, [ref]$element)) { throw 'NORMALIZED_JSON_SCHEMA_INVALID' }
@@ -235,15 +294,15 @@ jobs:
             }
             $status = Get-ExactJsonString $jsonRoot 'status' 'passed' 'NORMALIZED_IDENTITY_INVALID'
             $phase = Get-ExactJsonString $jsonRoot 'phase' 'c2a-pe-dependency-evidence' 'NORMALIZED_IDENTITY_INVALID'
-            $sourceCommit = Get-ExactJsonString $jsonRoot 'sourceCommit' '${{ github.sha }}' 'NORMALIZED_IDENTITY_INVALID'
+            $sourceCommit = Get-ExactJsonString $jsonRoot 'sourceCommit' $expectedCommit 'NORMALIZED_IDENTITY_INVALID'
             $helperBasename = Get-ExactJsonString $jsonRoot 'helperBasename' 'windows-logon-session-snapshot-helper.exe' 'NORMALIZED_HELPER_INVALID'
-            $helperSha256 = Get-ExactJsonString $jsonRoot 'helperSha256' $powershellSha256 'NORMALIZED_HELPER_INVALID'
+            $helperSha256 = Get-ExactJsonString $jsonRoot 'helperSha256' $expectedSha256 'NORMALIZED_HELPER_INVALID'
             $machine = Get-ExactJsonString $jsonRoot 'machine' 'AMD64' 'NORMALIZED_PE_INVALID'
             $peFormat = Get-ExactJsonString $jsonRoot 'peFormat' 'PE32+' 'NORMALIZED_PE_INVALID'
             $imageKind = Get-ExactJsonString $jsonRoot 'imageKind' 'executable' 'NORMALIZED_PE_INVALID'
             if ($sourceCommit -cnotmatch '^[a-f0-9]{40}$' -or $helperSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'NORMALIZED_IDENTITY_INVALID' }
             $sizeElement = Get-RequiredJsonElement $jsonRoot 'helperSizeBytes'; [Int64]$helperSizeBytes = 0
-            if ($sizeElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Number -or -not $sizeElement.TryGetInt64([ref]$helperSizeBytes) -or $helperSizeBytes -le 0 -or $helperSizeBytes -gt (16 * 1024 * 1024) -or $helperSizeBytes -ne [Int64]$helperSize) { throw 'NORMALIZED_HELPER_INVALID' }
+            if ($sizeElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Number -or -not $sizeElement.TryGetInt64([ref]$helperSizeBytes) -or $helperSizeBytes -le 0 -or $helperSizeBytes -gt (16 * 1024 * 1024) -or $helperSizeBytes -ne $expectedHelperSize) { throw 'NORMALIZED_HELPER_INVALID' }
             $dynamicBase = Get-ExactJsonBoolean $jsonRoot 'dynamicBase' $true 'NORMALIZED_MITIGATION_INVALID'
             $nxCompat = Get-ExactJsonBoolean $jsonRoot 'nxCompat' $true 'NORMALIZED_MITIGATION_INVALID'
             $guardCf = Get-ExactJsonBoolean $jsonRoot 'guardCf' $true 'NORMALIZED_MITIGATION_INVALID'
@@ -256,7 +315,14 @@ jobs:
             if ($subsystemElement.ValueKind -ne [System.Text.Json.JsonValueKind]::String) { throw 'NORMALIZED_JSON_SCHEMA_INVALID' }
             $subsystem = $subsystemElement.GetString()
             if ($subsystem -cnotmatch '^[A-Z0-9_]{1,64}$') { throw 'NORMALIZED_JSON_SCHEMA_INVALID' }
-          } finally { if ($null -ne $document) { $document.Dispose() } }
+              return [PSCustomObject]@{ SourceCommit = $sourceCommit; HelperBasename = $helperBasename; HelperSha256 = $helperSha256; HelperSizeBytes = $helperSizeBytes; Machine = $machine; PeFormat = $peFormat; ImageKind = $imageKind; Subsystem = $subsystem; DynamicBase = $dynamicBase; NxCompat = $nxCompat; GuardCf = $guardCf; DirectDependencies = @($directDependencies); ImportLibraries = @($importLibraries); DelayLoadLibraries = @($delayLoadLibraries) }
+            } finally { if ($null -ne $document) { $document.Dispose() } }
+          }
+          $normalized = Assert-NormalizedEvidenceJson $normalizerLines[0] '${{ github.sha }}' $powershellSha256 ([Int64]$helperSize)
+          $sourceCommit = $normalized.SourceCommit; $helperBasename = $normalized.HelperBasename; $helperSha256 = $normalized.HelperSha256; $helperSizeBytes = $normalized.HelperSizeBytes
+          $machine = $normalized.Machine; $peFormat = $normalized.PeFormat; $imageKind = $normalized.ImageKind; $subsystem = $normalized.Subsystem
+          $dynamicBase = $normalized.DynamicBase; $nxCompat = $normalized.NxCompat; $guardCf = $normalized.GuardCf
+          $directDependencies = $normalized.DirectDependencies; $importLibraries = $normalized.ImportLibraries; $delayLoadLibraries = $normalized.DelayLoadLibraries
           Write-Output "4A3_SOURCE_COMMIT=${{ github.sha }}"
           Write-Output "4A3_HELPER_BASENAME=$helperBasename"
           Write-Output "4A3_HELPER_SIZE_BYTES=$helperSizeBytes"
