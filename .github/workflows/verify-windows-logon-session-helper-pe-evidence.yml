@@ -1,0 +1,166 @@
+name: Verify Windows Helper PE Evidence
+
+on:
+  push:
+    branches:
+      - verify/4a3-real-helper-bff3f755
+
+permissions:
+  contents: read
+
+jobs:
+  native-x64-msvc-pe-evidence:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify event identity
+        shell: pwsh
+        run: |
+          Write-Output "github.repository=${{ github.repository }}"
+          Write-Output "github.ref=${{ github.ref }}"
+          Write-Output "github.sha=${{ github.sha }}"
+          Write-Output "github.event_name=${{ github.event_name }}"
+          Write-Output "runner.os=${{ runner.os }}"
+          Write-Output "runner.arch=${{ runner.arch }}"
+          if ('${{ github.ref }}' -ne 'refs/heads/verify/4a3-real-helper-bff3f755') { throw 'unexpected ref' }
+          if ('${{ github.event_name }}' -ne 'push') { throw 'unexpected event' }
+
+      - name: Prepare isolated temporary directories
+        shell: pwsh
+        run: |
+          $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+          $build = [IO.Path]::GetFullPath((Join-Path $runnerTemp 'studio-4a3-c2a-build'))
+          $evidence = [IO.Path]::GetFullPath((Join-Path $runnerTemp 'studio-4a3-c2a-evidence'))
+          foreach ($directory in @($build, $evidence)) {
+            if (-not $directory.StartsWith($runnerTemp + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'temporary directory escape' }
+            if (Test-Path -LiteralPath $directory) { Remove-Item -LiteralPath $directory -Recurse -Force }
+            New-Item -ItemType Directory -Path $directory -Force | Out-Null
+          }
+          "BUILD_DIRECTORY=$build" | Out-File -LiteralPath $env:GITHUB_ENV -Append -Encoding utf8
+          "EVIDENCE_DIRECTORY=$evidence" | Out-File -LiteralPath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Run JavaScript source and fake tests
+        shell: pwsh
+        run: |
+          node --check scripts/normalize-windows-logon-session-helper-pe-evidence.mjs
+          node --check scripts/test-windows-logon-session-helper-pe-evidence.mjs
+          node --check scripts/test-windows-logon-session-helper-pe-evidence-workflow-source-contract.mjs
+          node --check shared/windows-logon-session-real-validator.mjs
+          node --check scripts/validate-windows-logon-session-helper-real.mjs
+          node --check scripts/test-windows-logon-session-real-validator.mjs
+          node --check scripts/test-windows-logon-session-real-validator-source-contract.mjs
+          node scripts/test-windows-logon-session-helper-pe-evidence.mjs
+          node scripts/test-windows-logon-session-helper-pe-evidence-workflow-source-contract.mjs
+          node scripts/test-windows-logon-session-helper-source-contract.mjs
+          node scripts/test-windows-logon-session-real-validator.mjs
+          node scripts/test-windows-logon-session-real-validator-source-contract.mjs
+          node scripts/test-windows-logon-session-snapshot-protocol.mjs
+          node scripts/test-windows-logon-session-snapshot-runner.mjs
+          node scripts/test-windows-logon-session-liveness-provider.mjs
+          node scripts/test-host-execution-containment-comparison.mjs
+          node scripts/test-windows-logon-session-liveness-evidence.mjs
+
+      - name: Configure and build exact native targets
+        shell: pwsh
+        run: |
+          $build = $env:BUILD_DIRECTORY
+          cmake -S native/windows-logon-session-snapshot-helper -B $build -G "Visual Studio 17 2022" -A x64
+          cmake --build $build --config Release --target windows_logon_session_protocol
+          cmake --build $build --config Release --target windows-logon-session-snapshot-protocol-test
+          cmake --build $build --config Release --target windows-logon-session-snapshot-helper
+
+      - name: Run pure native protocol test and locate helper
+        shell: pwsh
+        run: |
+          $build = $env:BUILD_DIRECTORY
+          $protocolTests = @(Get-ChildItem -LiteralPath $build -Recurse -File -Filter 'windows-logon-session-snapshot-protocol-test.exe')
+          if ($protocolTests.Count -ne 1 -or (($protocolTests[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'protocol test location invalid' }
+          $protocolTest = $protocolTests[0]
+          & $protocolTest.FullName
+          if ($LASTEXITCODE -ne 0) { throw 'protocol test failed' }
+          $helpers = @(Get-ChildItem -LiteralPath $build -Recurse -File -Filter 'windows-logon-session-snapshot-helper.exe')
+          if ($helpers.Count -ne 1 -or (($helpers[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or $helpers[0].Length -le 0 -or $helpers[0].Length -gt (16 * 1024 * 1024)) { throw 'helper location invalid' }
+          $helperCanonical = (Resolve-Path -LiteralPath $helpers[0].FullName).Path
+          if (-not $helperCanonical.StartsWith([IO.Path]::GetFullPath($build) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'helper canonical path invalid' }
+          "HELPER_FILE=$helperCanonical" | Out-File -LiteralPath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Collect static PE evidence without executing helper
+        shell: pwsh
+        run: |
+          $helper = Get-Item -LiteralPath $env:HELPER_FILE
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw 'vswhere unavailable' }
+          $vsInstallation = @(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $vsInstallation.Count -ne 1 -or [string]::IsNullOrWhiteSpace($vsInstallation[0])) { throw 'Visual Studio unavailable' }
+          $vsRoot = [IO.Path]::GetFullPath($vsInstallation[0].Trim())
+          $vsDevCmd = Join-Path $vsRoot 'Common7\Tools\VsDevCmd.bat'
+          if (-not (Test-Path -LiteralPath $vsDevCmd -PathType Leaf)) { throw 'VsDevCmd unavailable' }
+          $environmentLines = cmd.exe /d /s /c "`"$vsDevCmd`" -arch=x64 -host_arch=x64 >nul && set"
+          if ($LASTEXITCODE -ne 0) { throw 'VsDevCmd failed' }
+          foreach ($line in $environmentLines) {
+            $separator = $line.IndexOf('=')
+            if ($separator -gt 0) { Set-Item -LiteralPath ("Env:" + $line.Substring(0, $separator)) -Value $line.Substring($separator + 1) }
+          }
+          $dumpbin = (Get-Command dumpbin.exe -ErrorAction Stop).Source
+          $dumpbin = [IO.Path]::GetFullPath($dumpbin)
+          if (-not $dumpbin.StartsWith($vsRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'dumpbin origin invalid' }
+          $evidence = $env:EVIDENCE_DIRECTORY
+          function Invoke-DumpbinEvidence([string]$switch, [string]$name) {
+            $path = Join-Path $evidence $name
+            & $dumpbin $switch $helper.FullName | Out-File -LiteralPath $path -Encoding utf8
+            if ($LASTEXITCODE -ne 0 -or (Get-Item -LiteralPath $path).Length -le 0) { throw 'dumpbin evidence invalid' }
+          }
+          Invoke-DumpbinEvidence '/headers' 'headers.txt'
+          Invoke-DumpbinEvidence '/dependents' 'dependents.txt'
+          Invoke-DumpbinEvidence '/imports' 'imports.txt'
+          Invoke-DumpbinEvidence '/loadconfig' 'loadconfig.txt'
+          $powershellSha256 = (Get-FileHash -LiteralPath $helper.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $normalizerJson = & node scripts/normalize-windows-logon-session-helper-pe-evidence.mjs --helper $helper.FullName --headers (Join-Path $evidence 'headers.txt') --dependents (Join-Path $evidence 'dependents.txt') --imports (Join-Path $evidence 'imports.txt') --loadconfig (Join-Path $evidence 'loadconfig.txt') --source-commit '${{ github.sha }}' --expected-powershell-sha256 $powershellSha256
+          if ($LASTEXITCODE -ne 0) { throw 'normalizer failed' }
+          $normalized = $normalizerJson | ConvertFrom-Json
+          if ($normalized.status -ne 'passed' -or $normalized.helperSha256 -ne $powershellSha256) { throw 'SHA-256 evidence mismatch' }
+          function Write-RedactedEvidence([string]$name, [string]$path) {
+            $text = [IO.File]::ReadAllText($path).Replace($helper.FullName, $helper.Name)
+            Write-Output "=== BEGIN DUMPBIN $name ==="
+            Write-Output $text
+            Write-Output "=== END DUMPBIN $name ==="
+          }
+          Write-RedactedEvidence 'HEADERS' (Join-Path $evidence 'headers.txt')
+          Write-RedactedEvidence 'DEPENDENTS' (Join-Path $evidence 'dependents.txt')
+          Write-RedactedEvidence 'IMPORTS' (Join-Path $evidence 'imports.txt')
+          Write-RedactedEvidence 'LOADCONFIG' (Join-Path $evidence 'loadconfig.txt')
+          Write-Output "4A3_SOURCE_COMMIT=${{ github.sha }}"
+          Write-Output "4A3_HELPER_BASENAME=$($normalized.helperBasename)"
+          Write-Output "4A3_HELPER_SIZE_BYTES=$($normalized.helperSizeBytes)"
+          Write-Output "4A3_HELPER_SHA256=$($normalized.helperSha256)"
+          $summary = @(
+            '## C2-A PE and dependency evidence',
+            "- Source commit: $($normalized.sourceCommit)",
+            "- Helper basename: $($normalized.helperBasename)",
+            "- Helper SHA-256: $($normalized.helperSha256)",
+            "- Helper size bytes: $($normalized.helperSizeBytes)",
+            "- Machine: $($normalized.machine)",
+            "- PE format: $($normalized.peFormat)",
+            "- Image kind: $($normalized.imageKind)",
+            "- Subsystem: $($normalized.subsystem)",
+            "- DYNAMICBASE: $($normalized.dynamicBase)",
+            "- NXCOMPAT: $($normalized.nxCompat)",
+            "- Guard CF: $($normalized.guardCf)",
+            "- Direct dependencies: $($normalized.directDependencies -join ', ')",
+            "- Import libraries: $($normalized.importLibraries -join ', ')",
+            "- Delay-load libraries: $($normalized.delayLoadLibraries -join ', ')",
+            '- Dependency policy: evidence-only; no DLL allowlist applied.',
+            '- Helper execution: not performed.',
+            '- Artifact upload: not performed.'
+          )
+          $summary -join "`n" | Out-File -LiteralPath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Assert evidence-only completion
+        shell: pwsh
+        run: |
+          Write-Output 'C2-A assertion: artifacts are not uploaded and the helper was not executed.'
