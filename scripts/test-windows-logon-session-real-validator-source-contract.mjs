@@ -5,7 +5,7 @@ const root = new URL("../", import.meta.url);
 const core = await readFile(new URL("shared/windows-logon-session-real-validator.mjs", root), "utf8");
 const cli = await readFile(new URL("scripts/validate-windows-logon-session-helper-real.mjs", root), "utf8");
 
-for (const name of ["createWindowsLogonSessionSnapshotProtocolAuthority", "createWindowsLogonSessionSnapshotRunner", "createWindowsLogonSessionLivenessProvider", "createHostExecutionContainmentComparisonAuthority", "serializeHostBootSessionWitness", "createWindowsLogonSessionKnownChildControl", "createLivenessProvider"]) assert.match(core, new RegExp(name));
+for (const name of ["createWindowsLogonSessionSnapshotProtocolAuthority", "createWindowsLogonSessionSnapshotRunner", "createWindowsLogonSessionLivenessProvider", "createHostExecutionContainmentComparisonAuthority", "serializeHostBootSessionWitness", "createWindowsLogonSessionKnownChildControl", "createLivenessProvider", "wrapSnapshotRunner", "wrapSnapshotConsumer"]) assert.match(core, new RegExp(name));
 for (const name of ["windows-logon-session-snapshot-helper.exe", "1500", "250", "3000", "4000", "monotonicNow", "waitForIdle", "activeChildCount", "comparePersistedWitness", "hashHelperFile", "inspectHelperDirectory", "containAfterDeadline", "SIGKILL", "stdoutReleaseAttempted", "stderrReleaseAttempted", "childUnrefAttempted", "disposeAfterIdle"]) assert.match(core, new RegExp(name));
 for (const forbidden of ["node:child_process", "node:fs", "process.env", ".studio-local", ".studio-tmp", "taskkill", "powershell", "wmic", "registry", "process.exit("]) assert.equal(core.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
 assert.match(cli, /spawn\(/); assert.equal(cli.includes("exec("), false); assert.equal(cli.includes("execFile"), false); assert.equal(cli.includes("spawnSync"), false);
@@ -15,6 +15,19 @@ for (const forbidden of ["cmd.exe", "powershell", "taskkill", "wmic", "where", "
 assert.equal(cli.includes("process.env.PATH"), false);
 assert.equal(/Promise\.all\(\[runPromise, providerPromise\]\)/.test(core), false);
 assert.equal(/const providerPromise\s*=/.test(core), false);
+assert.match(core, /const wrapSnapshotRunner = dependencies\.wrapSnapshotRunner \|\| identity/);
+assert.match(core, /const wrapSnapshotConsumer = dependencies\.wrapSnapshotConsumer \|\| identity/);
+const realRunner = core.indexOf("const realRunner = createWindowsLogonSessionSnapshotRunner");
+const wrappedRunner = core.indexOf("runner = wrapSnapshotRunner(realRunner)");
+const wrappedConsumer = core.indexOf("snapshotConsumer = wrapSnapshotConsumer(protocol.snapshotConsumer)");
+assert.ok(realRunner >= 0 && wrappedRunner > realRunner && wrappedConsumer >= 0);
+assert.ok(core.indexOf("snapshotRunner: runner", wrappedRunner) > wrappedRunner);
+assert.ok(core.indexOf("snapshotConsumer: protocol.snapshotConsumer", wrappedConsumer) > wrappedConsumer);
+assert.equal(cli.includes("wrapSnapshotRunner"), false);
+assert.equal(cli.includes("wrapSnapshotConsumer"), false);
+assert.equal(cli.includes("process.env.wrapSnapshotRunner"), false);
+assert.equal(cli.includes("process.env.wrapSnapshotConsumer"), false);
+assert.equal(core.includes("NODE_ENV"), false);
 const idleGate = core.indexOf("if (idleConfirmed !== true)");
 const postHashGate = core.indexOf("if (postHash !== expectedSha256");
 const providerFactory = core.indexOf("provider = createLivenessProvider");

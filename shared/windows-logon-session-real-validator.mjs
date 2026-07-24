@@ -64,6 +64,7 @@ export function getWindowsLogonSessionRealValidationExitCode(code) {
 function freeze(value) { return Object.freeze(value); }
 function record(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function failure(code) { return freeze({ ok: false, code, summary: null }); }
+function identity(value) { return value; }
 function normalizedWindowsPath(value) { return value.replaceAll("/", "\\").replace(/\\+$/, "").toLowerCase(); }
 function localDrivePath(value) {
 	return typeof value === "string" && value.length > 0 && !value.includes("\0")
@@ -97,12 +98,19 @@ function validWorkingDirectory(value, expectedDirectory) {
 		&& normalizedWindowsPath(value.path) !== normalizedWindowsPath(expectedDirectory)
 		&& !normalizedWindowsPath(value.path).startsWith(`${normalizedWindowsPath(expectedDirectory)}\\`);
 }
+function validRunner(value) {
+	return record(value) && typeof value.runOnce === "function" && typeof value.requestShutdown === "function"
+		&& typeof value.waitForIdle === "function" && typeof value.dispose === "function" && typeof value.getSafeState === "function";
+}
+function validSnapshotConsumer(value) { return record(value) && typeof value.consume === "function"; }
 function validDependencies(value) {
 	return record(value) && typeof value.inspectHelperFile === "function" && typeof value.inspectHelperDirectory === "function"
 		&& typeof value.resolveTrustedWorkingDirectory === "function" && typeof value.hashHelperFile === "function"
 		&& typeof value.spawnHelper === "function" && typeof value.scheduleTimer === "function" && typeof value.cancelTimer === "function"
 		&& typeof value.monotonicNow === "function" && typeof value.hashBytes === "function"
-		&& (value.createLivenessProvider === undefined || typeof value.createLivenessProvider === "function");
+		&& (value.createLivenessProvider === undefined || typeof value.createLivenessProvider === "function")
+		&& (value.wrapSnapshotRunner === undefined || typeof value.wrapSnapshotRunner === "function")
+		&& (value.wrapSnapshotConsumer === undefined || typeof value.wrapSnapshotConsumer === "function");
 }
 
 export function isWindowsLogonSessionKnownChildControl(value) { return controls.has(value); }
@@ -178,7 +186,12 @@ async function confirmIdleBeforeDeadline({ runner, control, deadline, monotonicN
 }
 
 function safeSummary(snapshotConsumer, snapshot) {
-	const consumed = snapshotConsumer.consume(snapshot, ({ currentLogonType, liveLuidBytes }) => freeze({ currentLogonType, sessionCount: liveLuidBytes.length }));
+	let consumed;
+	try {
+		consumed = snapshotConsumer.consume(snapshot, ({ currentLogonType, liveLuidBytes }) => freeze({ currentLogonType, sessionCount: liveLuidBytes.length }));
+	} catch {
+		return null;
+	}
 	if (!consumed?.ok || !record(consumed.value) || !Number.isSafeInteger(consumed.value.currentLogonType) || !Number.isSafeInteger(consumed.value.sessionCount)) return null;
 	return consumed.value;
 }
@@ -186,6 +199,8 @@ function safeSummary(snapshotConsumer, snapshot) {
 export function createWindowsLogonSessionRealValidator(dependencies = {}) {
 	if (!validDependencies(dependencies)) throw new TypeError("Windows logon-session real validator dependencies are invalid");
 	const createLivenessProvider = dependencies.createLivenessProvider || createWindowsLogonSessionLivenessProvider;
+	const wrapSnapshotRunner = dependencies.wrapSnapshotRunner || identity;
+	const wrapSnapshotConsumer = dependencies.wrapSnapshotConsumer || identity;
 	let used = false;
 	async function validate({ helperPath, expectedSha256 } = {}) {
 		if (used) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.alreadyUsed);
@@ -210,11 +225,16 @@ export function createWindowsLogonSessionRealValidator(dependencies = {}) {
 		if (initialHash !== expectedSha256) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperHashMismatch);
 
 		const protocol = createWindowsLogonSessionSnapshotProtocolAuthority();
+		let snapshotConsumer;
+		try {
+			snapshotConsumer = wrapSnapshotConsumer(protocol.snapshotConsumer);
+			if (!validSnapshotConsumer(snapshotConsumer)) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.unexpected);
+		} catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.unexpected); }
 		const containmentAuthority = createHostExecutionContainmentComparisonAuthority();
 		let control = null;
 		let runner;
 		try {
-			runner = createWindowsLogonSessionSnapshotRunner({
+			const realRunner = createWindowsLogonSessionSnapshotRunner({
 				spawnHelper: () => {
 					const spawned = dependencies.spawnHelper(trustedWorkingDirectory.path);
 					if (!record(spawned) || !isWindowsLogonSessionKnownChildControl(spawned.knownChildControl)) throw new TypeError("known child control is invalid");
@@ -228,6 +248,8 @@ export function createWindowsLogonSessionRealValidator(dependencies = {}) {
 				forceStopKnownChild: (knownChildControl) => knownChildControl.requestForceStop(),
 				policy: RUNNER_POLICY,
 			});
+			runner = wrapSnapshotRunner(realRunner);
+			if (!validRunner(runner)) return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.unexpected);
 		} catch { return failure(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.unexpected); }
 		const attemptStart = dependencies.monotonicNow();
 		const absoluteIdleDeadline = attemptStart + ABSOLUTE_IDLE_DEADLINE_MS;
@@ -255,7 +277,7 @@ export function createWindowsLogonSessionRealValidator(dependencies = {}) {
 		let postHash;
 		try { postHash = await dependencies.hashHelperFile(helperPath); } catch { return disposeAfterIdle(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperHashFailed); }
 		if (postHash !== expectedSha256 || postHash !== initialHash) return disposeAfterIdle(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.helperChanged);
-		const snapshot = safeSummary(protocol.snapshotConsumer, run.snapshot);
+		const snapshot = safeSummary(snapshotConsumer, run.snapshot);
 		if (!snapshot) return disposeAfterIdle(WINDOWS_LOGON_SESSION_REAL_VALIDATION_CODES.snapshotInvalid);
 		let provider;
 		let providerResult;
