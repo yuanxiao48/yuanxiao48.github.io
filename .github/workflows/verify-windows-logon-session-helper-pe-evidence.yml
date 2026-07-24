@@ -69,10 +69,14 @@ jobs:
         shell: pwsh
         run: |
           $build = $env:BUILD_DIRECTORY
-          cmake -S native/windows-logon-session-snapshot-helper -B $build -G "Visual Studio 17 2022" -A x64
-          cmake --build $build --config Release --target windows_logon_session_protocol
-          cmake --build $build --config Release --target windows-logon-session-snapshot-protocol-test
-          cmake --build $build --config Release --target windows-logon-session-snapshot-helper
+          & cmake -S native/windows-logon-session-snapshot-helper -B $build -G "Visual Studio 17 2022" -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'CMAKE_CONFIGURE_FAILED' }
+          & cmake --build $build --config Release --target windows_logon_session_protocol
+          if ($LASTEXITCODE -ne 0) { throw 'CMAKE_PROTOCOL_BUILD_FAILED' }
+          & cmake --build $build --config Release --target windows-logon-session-snapshot-protocol-test
+          if ($LASTEXITCODE -ne 0) { throw 'CMAKE_PROTOCOL_TEST_BUILD_FAILED' }
+          & cmake --build $build --config Release --target windows-logon-session-snapshot-helper
+          if ($LASTEXITCODE -ne 0) { throw 'CMAKE_HELPER_BUILD_FAILED' }
 
       - name: Run pure native protocol test and locate helper
         shell: pwsh
@@ -93,13 +97,20 @@ jobs:
         shell: pwsh
         run: |
           $helper = Get-Item -LiteralPath $env:HELPER_FILE
+          $helperSize = $helper.Length
+          $runnerTemp = (Resolve-Path -LiteralPath $env:RUNNER_TEMP).Path
+          $build = (Resolve-Path -LiteralPath $env:BUILD_DIRECTORY).Path
+          $evidence = (Resolve-Path -LiteralPath $env:EVIDENCE_DIRECTORY).Path
+          $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).Path
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw 'vswhere unavailable' }
           $vsInstallation = @(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
           if ($LASTEXITCODE -ne 0 -or $vsInstallation.Count -ne 1 -or [string]::IsNullOrWhiteSpace($vsInstallation[0])) { throw 'Visual Studio unavailable' }
-          $vsRoot = [IO.Path]::GetFullPath($vsInstallation[0].Trim())
+          $vsRoot = (Resolve-Path -LiteralPath $vsInstallation[0].Trim()).Path
           $vsDevCmd = Join-Path $vsRoot 'Common7\Tools\VsDevCmd.bat'
           if (-not (Test-Path -LiteralPath $vsDevCmd -PathType Leaf)) { throw 'VsDevCmd unavailable' }
+          $vsDevCmd = (Resolve-Path -LiteralPath $vsDevCmd).Path
+          if (-not $vsDevCmd.StartsWith($vsRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'VsDevCmd unavailable' }
           $environmentLines = cmd.exe /d /s /c "`"$vsDevCmd`" -arch=x64 -host_arch=x64 >nul && set"
           if ($LASTEXITCODE -ne 0) { throw 'VsDevCmd failed' }
           foreach ($line in $environmentLines) {
@@ -107,9 +118,9 @@ jobs:
             if ($separator -gt 0) { Set-Item -LiteralPath ("Env:" + $line.Substring(0, $separator)) -Value $line.Substring($separator + 1) }
           }
           $dumpbin = (Get-Command dumpbin.exe -ErrorAction Stop).Source
-          $dumpbin = [IO.Path]::GetFullPath($dumpbin)
-          if (-not $dumpbin.StartsWith($vsRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'dumpbin origin invalid' }
-          $evidence = $env:EVIDENCE_DIRECTORY
+          $dumpbin = (Resolve-Path -LiteralPath $dumpbin).Path
+          $dumpbinItem = Get-Item -LiteralPath $dumpbin
+          if (-not $dumpbin.StartsWith($vsRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or (($dumpbinItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or $dumpbinItem.PSIsContainer) { throw 'dumpbin origin invalid' }
           function Invoke-DumpbinEvidence([string]$switch, [string]$name) {
             $path = Join-Path $evidence $name
             & $dumpbin $switch $helper.FullName | Out-File -LiteralPath $path -Encoding utf8
@@ -120,20 +131,51 @@ jobs:
           Invoke-DumpbinEvidence '/imports' 'imports.txt'
           Invoke-DumpbinEvidence '/loadconfig' 'loadconfig.txt'
           $powershellSha256 = (Get-FileHash -LiteralPath $helper.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($powershellSha256 -notmatch '^[a-f0-9]{64}$') { throw 'POWERSHELL_SHA256_INVALID' }
           $normalizerJson = & node scripts/normalize-windows-logon-session-helper-pe-evidence.mjs --helper $helper.FullName --headers (Join-Path $evidence 'headers.txt') --dependents (Join-Path $evidence 'dependents.txt') --imports (Join-Path $evidence 'imports.txt') --loadconfig (Join-Path $evidence 'loadconfig.txt') --source-commit '${{ github.sha }}' --expected-powershell-sha256 $powershellSha256
           if ($LASTEXITCODE -ne 0) { throw 'normalizer failed' }
-          $normalized = $normalizerJson | ConvertFrom-Json
-          if ($normalized.status -ne 'passed' -or $normalized.helperSha256 -ne $powershellSha256) { throw 'SHA-256 evidence mismatch' }
-          function Write-RedactedEvidence([string]$name, [string]$path) {
-            $text = [IO.File]::ReadAllText($path).Replace($helper.FullName, $helper.Name)
+          $normalizerLines = @($normalizerJson | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+          if ($normalizerLines.Count -ne 1) { throw 'NORMALIZER_OUTPUT_INVALID' }
+          try { $normalized = $normalizerLines[0] | ConvertFrom-Json -ErrorAction Stop } catch { throw 'NORMALIZER_OUTPUT_INVALID' }
+          if ($normalized.status -ne 'passed' -or $normalized.phase -ne 'c2a-pe-dependency-evidence' -or $normalized.sourceCommit -ne '${{ github.sha }}' -or $normalized.helperBasename -ne 'windows-logon-session-snapshot-helper.exe' -or $normalized.helperSha256 -ne $powershellSha256 -or $normalized.helperSizeBytes -ne $helperSize) { throw 'NORMALIZER_IDENTITY_INVALID' }
+          if ($normalized.machine -ne 'AMD64' -or $normalized.peFormat -ne 'PE32+' -or $normalized.imageKind -ne 'executable' -or $normalized.dynamicBase -isnot [bool] -or $normalized.dynamicBase -ne $true -or $normalized.nxCompat -isnot [bool] -or $normalized.nxCompat -ne $true -or $normalized.guardCf -isnot [bool] -or $normalized.guardCf -ne $true) { throw 'NORMALIZER_PE_INVALID' }
+          if ($normalized.directDependencies -isnot [System.Array] -or $normalized.directDependencies.Count -eq 0 -or $normalized.importLibraries -isnot [System.Array] -or $normalized.importLibraries.Count -eq 0 -or $normalized.delayLoadLibraries -isnot [System.Array] -or $normalized.dependencyPolicy -ne 'evidence-only' -or $normalized.allowlistApplied -isnot [bool] -or $normalized.allowlistApplied -ne $false) { throw 'NORMALIZER_DEPENDENCY_INVALID' }
+          function Replace-LiteralPathInsensitive([string]$text, [string]$needle, [string]$replacement) {
+            if ([string]::IsNullOrWhiteSpace($needle)) { return $text }
+            return [regex]::Replace($text, [regex]::Escape($needle), $replacement, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+          }
+          function Protect-DumpbinEvidence([string]$name, [string]$path, [string]$residueCode) {
+            $text = [IO.File]::ReadAllText($path)
+            $userProfile = if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) { $null } else { (Resolve-Path -LiteralPath $env:USERPROFILE).Path }
+            $replacements = @(
+              @{ needle = $helper.FullName; replacement = 'windows-logon-session-snapshot-helper.exe' },
+              @{ needle = $build; replacement = '<RUNNER_TEMP>' },
+              @{ needle = $evidence; replacement = '<RUNNER_TEMP>' },
+              @{ needle = $runnerTemp; replacement = '<RUNNER_TEMP>' },
+              @{ needle = $workspace; replacement = '<GITHUB_WORKSPACE>' },
+              @{ needle = $vsRoot; replacement = '<VISUAL_STUDIO>' },
+              @{ needle = $userProfile; replacement = '<USERPROFILE>' }
+            )
+            foreach ($entry in $replacements) { $text = Replace-LiteralPathInsensitive $text $entry.needle $entry.replacement }
+            foreach ($entry in $replacements) { if (-not [string]::IsNullOrWhiteSpace($entry.needle) -and $text.IndexOf($entry.needle, [StringComparison]::OrdinalIgnoreCase) -ge 0) { throw $residueCode } }
+            if ($text -match '(?i)(?:[A-Z]:[\\/]|\\\\[^\\/\r\n]+[\\/])') { throw $residueCode }
+            return $text
+          }
+          $protectedEvidence = @{
+            HEADERS = Protect-DumpbinEvidence 'HEADERS' (Join-Path $evidence 'headers.txt') 'HEADERS_PATH_RESIDUE'
+            DEPENDENTS = Protect-DumpbinEvidence 'DEPENDENTS' (Join-Path $evidence 'dependents.txt') 'DEPENDENTS_PATH_RESIDUE'
+            IMPORTS = Protect-DumpbinEvidence 'IMPORTS' (Join-Path $evidence 'imports.txt') 'IMPORTS_PATH_RESIDUE'
+            LOADCONFIG = Protect-DumpbinEvidence 'LOADCONFIG' (Join-Path $evidence 'loadconfig.txt') 'LOADCONFIG_PATH_RESIDUE'
+          }
+          function Write-RedactedEvidence([string]$name, [string]$text) {
             Write-Output "=== BEGIN DUMPBIN $name ==="
             Write-Output $text
             Write-Output "=== END DUMPBIN $name ==="
           }
-          Write-RedactedEvidence 'HEADERS' (Join-Path $evidence 'headers.txt')
-          Write-RedactedEvidence 'DEPENDENTS' (Join-Path $evidence 'dependents.txt')
-          Write-RedactedEvidence 'IMPORTS' (Join-Path $evidence 'imports.txt')
-          Write-RedactedEvidence 'LOADCONFIG' (Join-Path $evidence 'loadconfig.txt')
+          Write-RedactedEvidence 'HEADERS' $protectedEvidence.HEADERS
+          Write-RedactedEvidence 'DEPENDENTS' $protectedEvidence.DEPENDENTS
+          Write-RedactedEvidence 'IMPORTS' $protectedEvidence.IMPORTS
+          Write-RedactedEvidence 'LOADCONFIG' $protectedEvidence.LOADCONFIG
           Write-Output "4A3_SOURCE_COMMIT=${{ github.sha }}"
           Write-Output "4A3_HELPER_BASENAME=$($normalized.helperBasename)"
           Write-Output "4A3_HELPER_SIZE_BYTES=$($normalized.helperSizeBytes)"
@@ -156,7 +198,8 @@ jobs:
             "- Delay-load libraries: $($normalized.delayLoadLibraries -join ', ')",
             '- Dependency policy: evidence-only; no DLL allowlist applied.',
             '- Helper execution: not performed.',
-            '- Artifact upload: not performed.'
+            '- Artifact upload: not performed.',
+            '- Dependencies have not been allowlisted.'
           )
           $summary -join "`n" | Out-File -LiteralPath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
