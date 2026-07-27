@@ -20,8 +20,13 @@ for (let index = 0; index < workflowLines.length; index += 1) {
 }
 
 const collectStepName = "Collect static PE evidence without executing helper";
-const collectStepIndex = workflowLines.findIndex((line) => line === `      - name: ${collectStepName}`);
-assert.notEqual(collectStepIndex, -1, "collect PE evidence step");
+const collectStepLine = `      - name: ${collectStepName}`;
+const collectStepIndices = [];
+for (let index = 0; index < workflowLines.length; index += 1) {
+	if (workflowLines[index] === collectStepLine) collectStepIndices.push(index);
+}
+assert.equal(collectStepIndices.length, 1, "exactly one collect PE evidence step");
+const [collectStepIndex] = collectStepIndices;
 const collectRunIndex = workflowLines.findIndex((line, index) => index > collectStepIndex && /^\s*run:\s*\|\s*$/.test(line));
 assert.notEqual(collectRunIndex, -1, "collect PE evidence literal run block");
 const collectEvidenceBlock = getLiteralRunBlock(workflowLines, collectRunIndex);
