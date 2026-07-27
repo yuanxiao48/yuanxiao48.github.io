@@ -1,9 +1,9 @@
 ---
 title: "vrchat 图片测试"
 published: 2026-07-11
-updated: "2026-07-14T07:21:00+08:00"
+updated: "2026-07-28T05:16:00+08:00"
 draft: false
-category: "日常"
+category: "测试"
 tags: []
 description: ""
 image: "/assets/images/posts/vrchat-2026-06-11-22-51-07-006-3840x2160-1783751718875.png"

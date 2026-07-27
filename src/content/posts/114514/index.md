@@ -4,12 +4,12 @@ published: "2026-06-22T11:58:00+08:00"
 description: "11"
 image: ""
 tags: ["11"]
-category: "日常"
+category: "测试"
 draft: false
 comment: true
 lang: zh-CN
 pinned: false
-updated: "2026-07-12T07:54:00+08:00"
+updated: "2026-07-28T05:16:00+08:00"
 ---
 
 这是我的blog的第一篇文章
