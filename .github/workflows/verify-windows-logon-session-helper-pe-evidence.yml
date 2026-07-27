@@ -102,6 +102,8 @@ jobs:
           $build = (Resolve-Path -LiteralPath $env:BUILD_DIRECTORY).Path
           $evidence = (Resolve-Path -LiteralPath $env:EVIDENCE_DIRECTORY).Path
           $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).Path
+          $expectedCommit = $env:GITHUB_SHA
+          if ([string]::IsNullOrWhiteSpace($expectedCommit) -or $expectedCommit -cnotmatch '^[a-f0-9]{40}$') { throw 'GITHUB_SHA_INVALID' }
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw 'vswhere unavailable' }
           $vsInstallation = @(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
@@ -237,7 +239,7 @@ jobs:
           Write-RedactedEvidence 'LOADCONFIG' $protectedStdout.LOADCONFIG
           $normalizerStdoutPath = Join-Path $evidence 'normalizer.stdout.txt'
           $normalizerStderrPath = Join-Path $evidence 'normalizer.stderr.txt'
-          & node scripts/normalize-windows-logon-session-helper-pe-evidence.mjs --helper $helper.FullName --headers (Join-Path $evidence 'headers.stdout.txt') --dependents (Join-Path $evidence 'dependents.stdout.txt') --imports (Join-Path $evidence 'imports.stdout.txt') --loadconfig (Join-Path $evidence 'loadconfig.stdout.txt') --source-commit '${{ github.sha }}' --expected-powershell-sha256 $powershellSha256 1> $normalizerStdoutPath 2> $normalizerStderrPath
+          & node scripts/normalize-windows-logon-session-helper-pe-evidence.mjs --helper $helper.FullName --headers (Join-Path $evidence 'headers.stdout.txt') --dependents (Join-Path $evidence 'dependents.stdout.txt') --imports (Join-Path $evidence 'imports.stdout.txt') --loadconfig (Join-Path $evidence 'loadconfig.stdout.txt') --source-commit $expectedCommit --expected-powershell-sha256 $powershellSha256 1> $normalizerStdoutPath 2> $normalizerStderrPath
           $normalizerExitCode = $LASTEXITCODE
           $normalizerStdout = Protect-ToolOutput (Read-BoundedToolOutput $normalizerStdoutPath $false $maxNormalizerStdoutBytes 'NORMALIZER_STDOUT_INVALID' 'NORMALIZER_STDOUT_TOO_LARGE' 'NORMALIZER_STDOUT_READ_FAILED') 'NORMALIZER_STDOUT_PATH_RESIDUE'
           $normalizerStderr = Protect-ToolOutput (Read-BoundedToolOutput $normalizerStderrPath $true $maxNormalizerStderrBytes 'NORMALIZER_STDERR_INVALID' 'NORMALIZER_STDERR_TOO_LARGE' 'NORMALIZER_STDERR_READ_FAILED') 'NORMALIZER_STDERR_PATH_RESIDUE'
@@ -318,12 +320,12 @@ jobs:
               return [PSCustomObject]@{ SourceCommit = $sourceCommit; HelperBasename = $helperBasename; HelperSha256 = $helperSha256; HelperSizeBytes = $helperSizeBytes; Machine = $machine; PeFormat = $peFormat; ImageKind = $imageKind; Subsystem = $subsystem; DynamicBase = $dynamicBase; NxCompat = $nxCompat; GuardCf = $guardCf; DirectDependencies = @($directDependencies); ImportLibraries = @($importLibraries); DelayLoadLibraries = @($delayLoadLibraries) }
             } finally { if ($null -ne $document) { $document.Dispose() } }
           }
-          $normalized = Assert-NormalizedEvidenceJson $normalizerLines[0] '${{ github.sha }}' $powershellSha256 ([Int64]$helperSize)
+          $normalized = Assert-NormalizedEvidenceJson $normalizerLines[0] $expectedCommit $powershellSha256 ([Int64]$helperSize)
           $sourceCommit = $normalized.SourceCommit; $helperBasename = $normalized.HelperBasename; $helperSha256 = $normalized.HelperSha256; $helperSizeBytes = $normalized.HelperSizeBytes
           $machine = $normalized.Machine; $peFormat = $normalized.PeFormat; $imageKind = $normalized.ImageKind; $subsystem = $normalized.Subsystem
           $dynamicBase = $normalized.DynamicBase; $nxCompat = $normalized.NxCompat; $guardCf = $normalized.GuardCf
           $directDependencies = $normalized.DirectDependencies; $importLibraries = $normalized.ImportLibraries; $delayLoadLibraries = $normalized.DelayLoadLibraries
-          Write-Output "4A3_SOURCE_COMMIT=${{ github.sha }}"
+          Write-Output "4A3_SOURCE_COMMIT=$sourceCommit"
           Write-Output "4A3_HELPER_BASENAME=$helperBasename"
           Write-Output "4A3_HELPER_SIZE_BYTES=$helperSizeBytes"
           Write-Output "4A3_HELPER_SHA256=$helperSha256"

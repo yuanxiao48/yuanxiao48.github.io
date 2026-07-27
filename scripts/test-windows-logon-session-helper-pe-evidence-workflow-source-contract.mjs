@@ -2,6 +2,39 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const workflow = await readFile(new URL("../.github/workflows/verify-windows-logon-session-helper-pe-evidence.yml", import.meta.url), "utf8");
+
+function getLiteralRunBlock(lines, runIndex) {
+	const match = lines[runIndex].match(/^(\s*)run:\s*\|\s*$/);
+	assert.notEqual(match, null, "literal run block");
+	const indentation = match[1].length;
+	let end = runIndex + 1;
+	while (end < lines.length && (lines[end].trim() === "" || lines[end].match(/^\s*/)[0].length > indentation)) end += 1;
+	return Object.freeze({ start: runIndex + 1, text: lines.slice(runIndex + 1, end).join("\n") });
+}
+
+const workflowLines = workflow.replace(/\r\n/g, "\n").split("\n");
+const literalRunBlocks = [];
+for (let index = 0; index < workflowLines.length; index += 1) {
+	if (!/^\s*run:\s*\|\s*$/.test(workflowLines[index])) continue;
+	literalRunBlocks.push(getLiteralRunBlock(workflowLines, index));
+}
+
+const collectStepName = "Collect static PE evidence without executing helper";
+const collectStepIndex = workflowLines.findIndex((line) => line === `      - name: ${collectStepName}`);
+assert.notEqual(collectStepIndex, -1, "collect PE evidence step");
+const collectRunIndex = workflowLines.findIndex((line, index) => index > collectStepIndex && /^\s*run:\s*\|\s*$/.test(line));
+assert.notEqual(collectRunIndex, -1, "collect PE evidence literal run block");
+const collectEvidenceBlock = getLiteralRunBlock(workflowLines, collectRunIndex);
+assert.equal(collectEvidenceBlock.text.includes("${{"), false, "collect PE evidence run block has no Actions expression interpolation");
+assert.match(collectEvidenceBlock.text, /\$expectedCommit = \$env:GITHUB_SHA\s*\n\s*if \(\[string\]::IsNullOrWhiteSpace\(\$expectedCommit\) -or \$expectedCommit -cnotmatch '\^\[a-f0-9\]\{40\}\$'\) \{ throw 'GITHUB_SHA_INVALID' \}/);
+assert.equal((collectEvidenceBlock.text.match(/\$expectedCommit\s*=/g) || []).length, 1, "expected commit assigned once");
+assert.match(collectEvidenceBlock.text, /--source-commit \$expectedCommit --expected-powershell-sha256/);
+assert.match(collectEvidenceBlock.text, /Assert-NormalizedEvidenceJson \$normalizerLines\[0\] \$expectedCommit \$powershellSha256/);
+assert.match(collectEvidenceBlock.text, /Write-Output "4A3_SOURCE_COMMIT=\$sourceCommit"/);
+for (const block of literalRunBlocks) {
+	if (block.text.length >= 20_000) assert.equal(block.text.includes("${{"), false, `oversized run block at line ${block.start} has no Actions expression interpolation`);
+}
+
 const required = [
 	"name: Verify Windows Helper PE Evidence", "verify/4a3-real-helper-bff3f755", "contents: read", "runs-on: windows-2022", "timeout-minutes: 15",
 	"actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2", "persist-credentials: false", "fetch-depth: 1", "Visual Studio 17 2022", "-A x64", "--config Release",
