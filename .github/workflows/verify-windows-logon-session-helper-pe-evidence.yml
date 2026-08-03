@@ -241,10 +241,49 @@ jobs:
           $normalizerStderrPath = Join-Path $evidence 'normalizer.stderr.txt'
           & node scripts/normalize-windows-logon-session-helper-pe-evidence.mjs --helper $helper.FullName --headers (Join-Path $evidence 'headers.stdout.txt') --dependents (Join-Path $evidence 'dependents.stdout.txt') --imports (Join-Path $evidence 'imports.stdout.txt') --loadconfig (Join-Path $evidence 'loadconfig.stdout.txt') --source-commit $expectedCommit --expected-powershell-sha256 $powershellSha256 1> $normalizerStdoutPath 2> $normalizerStderrPath
           $normalizerExitCode = $LASTEXITCODE
-          $normalizerStdout = Protect-ToolOutput (Read-BoundedToolOutput $normalizerStdoutPath $false $maxNormalizerStdoutBytes 'NORMALIZER_STDOUT_INVALID' 'NORMALIZER_STDOUT_TOO_LARGE' 'NORMALIZER_STDOUT_READ_FAILED') 'NORMALIZER_STDOUT_PATH_RESIDUE'
+          $normalizerStdout = Protect-ToolOutput (Read-BoundedToolOutput $normalizerStdoutPath $true $maxNormalizerStdoutBytes 'NORMALIZER_STDOUT_INVALID' 'NORMALIZER_STDOUT_TOO_LARGE' 'NORMALIZER_STDOUT_READ_FAILED') 'NORMALIZER_STDOUT_PATH_RESIDUE'
           $normalizerStderr = Protect-ToolOutput (Read-BoundedToolOutput $normalizerStderrPath $true $maxNormalizerStderrBytes 'NORMALIZER_STDERR_INVALID' 'NORMALIZER_STDERR_TOO_LARGE' 'NORMALIZER_STDERR_READ_FAILED') 'NORMALIZER_STDERR_PATH_RESIDUE'
+          function Assert-NormalizerFailureJson([string]$jsonText, [Int32]$expectedExitCode) {
+            $document = $null
+            try {
+              try { $document = [System.Text.Json.JsonDocument]::Parse($jsonText) } catch { throw 'NORMALIZER_FAILURE_JSON_INVALID' }
+              $jsonRoot = $document.RootElement
+              if ($jsonRoot.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) { throw 'NORMALIZER_FAILURE_JSON_INVALID' }
+              $expectedProperties = [string[]]@('status', 'code')
+              $expectedPropertySet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+              $seenProperties = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+              foreach ($propertyName in $expectedProperties) { [void]$expectedPropertySet.Add($propertyName) }
+              $propertyCount = 0
+              foreach ($property in $jsonRoot.EnumerateObject()) {
+                $propertyCount += 1
+                if (-not $expectedPropertySet.Contains($property.Name) -or -not $seenProperties.Add($property.Name)) { throw 'NORMALIZER_FAILURE_JSON_INVALID' }
+              }
+              if ($propertyCount -ne $expectedProperties.Length -or -not $seenProperties.Contains('status') -or -not $seenProperties.Contains('code')) { throw 'NORMALIZER_FAILURE_JSON_INVALID' }
+              [System.Text.Json.JsonElement]$statusElement = [System.Text.Json.JsonElement]::new()
+              [System.Text.Json.JsonElement]$codeElement = [System.Text.Json.JsonElement]::new()
+              if (-not $jsonRoot.TryGetProperty('status', [ref]$statusElement) -or -not $jsonRoot.TryGetProperty('code', [ref]$codeElement) -or $statusElement.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or $statusElement.GetString() -cne 'failed' -or $codeElement.ValueKind -ne [System.Text.Json.JsonValueKind]::String) { throw 'NORMALIZER_FAILURE_JSON_INVALID' }
+              $allowedCodes = @{
+                2 = [System.Collections.Generic.HashSet[string]]::new([string[]]@('WINDOWS_LOGON_PE_EVIDENCE_ARGUMENT_INVALID', 'WINDOWS_LOGON_PE_EVIDENCE_HELPER_INVALID', 'WINDOWS_LOGON_PE_EVIDENCE_HELPER_SIZE_INVALID', 'WINDOWS_LOGON_PE_EVIDENCE_EVIDENCE_INVALID', 'WINDOWS_LOGON_PE_EVIDENCE_EVIDENCE_SIZE_INVALID', 'WINDOWS_LOGON_PE_EVIDENCE_EVIDENCE_DUPLICATE'), [System.StringComparer]::Ordinal)
+                3 = [System.Collections.Generic.HashSet[string]]::new([string[]]@('WINDOWS_LOGON_PE_EVIDENCE_SHA_MISMATCH'), [System.StringComparer]::Ordinal)
+                4 = [System.Collections.Generic.HashSet[string]]::new([string[]]@('WINDOWS_LOGON_PE_EVIDENCE_HEADERS_INVALID', 'WINDOWS_LOGON_PE_EVIDENCE_ARCHITECTURE_INVALID', 'WINDOWS_LOGON_PE_EVIDENCE_PE_FORMAT_INVALID', 'WINDOWS_LOGON_PE_EVIDENCE_IMAGE_KIND_INVALID', 'WINDOWS_LOGON_PE_EVIDENCE_MITIGATION_MISSING', 'WINDOWS_LOGON_PE_EVIDENCE_DEPENDENTS_INVALID', 'WINDOWS_LOGON_PE_EVIDENCE_IMPORTS_INVALID', 'WINDOWS_LOGON_PE_EVIDENCE_LOADCONFIG_INVALID'), [System.StringComparer]::Ordinal)
+                7 = [System.Collections.Generic.HashSet[string]]::new([string[]]@('WINDOWS_LOGON_PE_EVIDENCE_UNEXPECTED'), [System.StringComparer]::Ordinal)
+              }
+              $normalizerFailureCode = $codeElement.GetString()
+              if (-not $allowedCodes.ContainsKey($expectedExitCode) -or -not $allowedCodes[$expectedExitCode].Contains($normalizerFailureCode)) { throw 'NORMALIZER_FAILURE_EXIT_CODE_MISMATCH' }
+              return $normalizerFailureCode
+            } finally { if ($null -ne $document) { $document.Dispose() } }
+          }
+          if ($normalizerExitCode -ne 0) {
+            if ($normalizerStdout.Length -ne 0) { throw 'NORMALIZER_FAILURE_STDOUT_NONEMPTY' }
+            if ($normalizerStderr.Length -eq 0) { throw 'NORMALIZER_FAILURE_STDERR_INVALID' }
+            $normalizerFailureLines = @($normalizerStderr -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            if ($normalizerFailureLines.Count -ne 1) { throw 'NORMALIZER_FAILURE_JSON_INVALID' }
+            $normalizerFailureCode = Assert-NormalizerFailureJson $normalizerFailureLines[0] ([Int32]$normalizerExitCode)
+            Write-Output "4A3_NORMALIZER_FAILURE_CODE=$normalizerFailureCode"
+            throw $normalizerFailureCode
+          }
           if ($normalizerStderr.Length -ne 0) { throw 'NORMALIZER_STDERR_NONEMPTY' }
-          if ($normalizerExitCode -ne 0) { throw 'NORMALIZED_JSON_INVALID' }
+          if ($normalizerStdout.Length -eq 0) { throw 'NORMALIZER_STDOUT_INVALID' }
           $normalizerLines = @($normalizerStdout -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
           if ($normalizerLines.Count -ne 1) { throw 'NORMALIZED_JSON_INVALID' }
           function Assert-NormalizedEvidenceJson([string]$jsonText, [string]$expectedCommit, [string]$expectedSha256, [Int64]$expectedHelperSize) {
