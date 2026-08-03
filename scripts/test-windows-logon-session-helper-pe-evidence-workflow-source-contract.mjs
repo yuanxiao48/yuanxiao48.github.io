@@ -79,8 +79,28 @@ assert.match(workflow, /\(\?<!\[A-Za-z0-9\+\.\\-\]\)\[A-Za-z\]:\[\\\\\/\]/);
 assert.match(workflow, /\(\?<!:\)\(\?<!\[A-Za-z0-9\+\.\\-\]\)\/\/\[\^\/\\r\\n\]\+\//);
 assert.match(workflow, /\[regex\]::Escape\(\$needle\)/);
 assert.match(workflow, /\$normalizerLines\.Count -ne 1/);
-assert.match(workflow, /& node scripts\/normalize-windows-logon-session-helper-pe-evidence\.mjs[\s\S]*1> \$normalizerStdoutPath 2> \$normalizerStderrPath/);
-assert.match(workflow, /\$normalizerExitCode = \$LASTEXITCODE/);
+const collectEvidenceLines = collectEvidenceBlock.text.split("\n");
+const normalizerInvocationIndices = [];
+for (let index = 0; index < collectEvidenceLines.length; index += 1) {
+	const statement = collectEvidenceLines[index].trimStart();
+	if (statement.startsWith("& node")
+		&& statement.includes("scripts/normalize-windows-logon-session-helper-pe-evidence.mjs")
+		&& statement.includes("1> $normalizerStdoutPath")
+		&& statement.includes("2> $normalizerStderrPath")) normalizerInvocationIndices.push(index);
+}
+assert.equal(normalizerInvocationIndices.length, 1, "exactly one normalizer invocation");
+const [normalizerInvocationIndex] = normalizerInvocationIndices;
+const normalizerIndentation = collectEvidenceLines[normalizerInvocationIndex].match(/^\s*/)[0];
+let nextNormalizerStatement;
+for (let index = normalizerInvocationIndex + 1; index < collectEvidenceLines.length; index += 1) {
+	const line = collectEvidenceLines[index];
+	if (line.trim().length === 0) continue;
+	assert.equal(line.startsWith(normalizerIndentation), true, "normalizer follow-up shares the run block indentation");
+	nextNormalizerStatement = line.slice(normalizerIndentation.length);
+	break;
+}
+assert.notEqual(nextNormalizerStatement, undefined, "normalizer invocation has a following statement");
+assert.equal(nextNormalizerStatement, "$normalizerExitCode = $LASTEXITCODE", "normalizer exit code captured immediately");
 assert.match(collectEvidenceBlock.text, /Read-BoundedToolOutput \$normalizerStdoutPath \$true \$maxNormalizerStdoutBytes/);
 assert.match(collectEvidenceBlock.text, /Read-BoundedToolOutput \$normalizerStderrPath \$true \$maxNormalizerStderrBytes/);
 assert.equal(collectEvidenceBlock.text.indexOf("$normalizerExitCode = $LASTEXITCODE") < collectEvidenceBlock.text.indexOf("$normalizerStdout ="), true);
